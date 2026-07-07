@@ -214,6 +214,22 @@ await call.transfer(
 )
 ```
 
+### SIP 엔드포인트 전환
+
+전화번호(PSTN) 대신 SIP 엔드포인트로 통화를 직접 전환합니다.
+PSTN 통신사를 거치지 않고 SIP URI(`sip:user@host`)로 INVITE 브릿지합니다 (녹음·관측 유지).
+
+```python
+await call.transfer(
+    "sip:agent@sip.example.com",
+    destination_type="sip",  # 기본값: "pstn" (전화번호 전환)
+)
+```
+
+> **`sip_trunk` 부가서비스가 필요합니다.** 부가서비스가 없는 계정이 SIP 전환을 시도하면
+> 전환은 실패하고(`{"status": "failed"}`) 통화는 끊기지 않은 채 AI가 계속 응대합니다.
+> 인바운드 BYOC/softphone 라우팅과 동일한 게이트입니다.
+
 ### Context 전달
 
 전환 대상에게 고객 정보 등 구조화 데이터를 webhook으로 전달할 수 있습니다.
@@ -236,7 +252,8 @@ await call.transfer(
 
 | 파라미터 | 타입 | 기본값 | 설명 |
 |:---------|:-----|:-------|:-----|
-| `to` | `str` | (필수) | 전환할 전화번호 |
+| `to` | `str` | (필수) | 전환 대상. `destination_type="pstn"`이면 전화번호, `"sip"`이면 SIP URI(`sip:user@host`) |
+| `destination_type` | `str` | `"pstn"` | `"pstn"`: 통신사 경유 전화번호 전환, `"sip"`: SIP 엔드포인트 직접 전환 (**`sip_trunk` 부가서비스 필요**) |
 | `mode` | `str` | `"blind"` | `"blind"`: 즉시 전환, `"warm"`: whisper 후 전환 |
 | `after_transfer` | `str` | `"terminate"` | `"terminate"`: AI 세션 종료, `"return"`: 전환 통화 종료 후 AI가 다시 대화를 이어감 |
 | `hold_media` | `str` | `"moh"` | 전환 중 고객에게 재생할 대기 음원. `"moh"`: 대기 음악, `"silence"`: 무음 |
