@@ -51,11 +51,19 @@ _SEND_DTMF = {
 
 _TRANSFER_CALL = {
     "name": "transfer_call",
-    "description": "Transfer the current call to another phone number. Use for blind transfer (direct handoff) or warm transfer (with whisper message to the target).",
+    "description": "Transfer the current call to another phone number or SIP endpoint. Use for blind transfer (direct handoff) or warm transfer (with whisper message to the target).",
     "parameters": {
         "type": "object",
         "properties": {
-            "to": {"type": "string", "description": "Phone number to transfer to"},
+            "to": {
+                "type": "string",
+                "description": "Transfer destination. A phone number when destination_type is 'pstn', or a SIP URI (e.g. 'sip:user@host') when destination_type is 'sip'.",
+            },
+            "destination_type": {
+                "type": "string",
+                "enum": ["pstn", "sip"],
+                "description": "pstn: dial a phone number via carrier (default). sip: connect directly to a SIP endpoint (no carrier/PSTN).",
+            },
             "mode": {
                 "type": "string",
                 "enum": ["blind", "warm"],

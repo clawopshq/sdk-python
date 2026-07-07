@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Literal
 
 from clawops.agent._telemetry import CallMetrics
 
@@ -139,6 +139,7 @@ class CallSession:
         self,
         to: str,
         *,
+        destination_type: Literal["pstn", "sip"] = "pstn",
         mode: str = "blind",
         after_transfer: str = "terminate",
         hold_media: str = "ringback",
@@ -147,11 +148,17 @@ class CallSession:
         caller_id: str | None = None,
         timeout: int = 30,
     ) -> dict:
-        """Transfer the current call to another phone number."""
+        """Transfer the current call to a phone number or SIP endpoint.
+
+        destination_type='pstn' (default): ``to`` is a phone number dialed via carrier.
+        destination_type='sip': ``to`` is a SIP URI (e.g. ``sip:user@host``) connected
+        directly to a SIP endpoint without going through the PSTN carrier.
+        """
         if not self._transfer_fn:
             raise RuntimeError("transfer not available")
         return await self._transfer_fn({
             "to": to,
+            "destinationType": destination_type,
             "mode": mode,
             "afterTransfer": after_transfer,
             "holdMedia": hold_media,
