@@ -24,6 +24,19 @@ def test_agent_creation():
     assert agent._session._config.system_prompt == "test prompt"
     assert agent._rx_gain == 0.8
     assert agent._tx_gain == 1.2
+    # machine_detection default 는 None (미지정 시 AMD 비활성)
+    assert agent._machine_detection is None
+
+
+def test_agent_machine_detection_default():
+    agent = ClawOpsAgent(
+        api_key="sk_test",
+        account_id="AC_test",
+        from_="07012341234",
+        session=_make_session(),
+        machine_detection="Hangup",
+    )
+    assert agent._machine_detection == "Hangup"
 
 
 def test_agent_tool_decorator():
@@ -269,6 +282,77 @@ async def test_call_starts_prewarm_at_originate():
     task = agent._prewarm_tasks.get("CO1")
     if task and not task.done():
         task.cancel()
+
+
+def _mock_originate_ok():
+    """aiohttp POST → 201 {"callId": "CO1"} 모킹 컨텍스트. (http_session, patch_target)."""
+    resp = MagicMock()
+    resp.status = 201
+    resp.json = AsyncMock(return_value={"callId": "CO1"})
+    post_ctx = MagicMock()
+    post_ctx.__aenter__ = AsyncMock(return_value=resp)
+    post_ctx.__aexit__ = AsyncMock(return_value=False)
+    http_session = MagicMock()
+    http_session.post = MagicMock(return_value=post_ctx)
+    session_ctx = MagicMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=http_session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    return http_session, session_ctx
+
+
+def _posted_body(http_session) -> dict:
+    return http_session.post.call_args.kwargs["json"]
+
+
+@pytest.mark.asyncio
+async def test_call_omits_machine_detection_by_default():
+    """machine_detection 미지정 시 MachineDetection 이 body 에 실리지 않는다."""
+    session_mock = MagicMock(prewarm=AsyncMock(), attach=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
+    agent = ClawOpsAgent(api_key="sk_test", account_id="AC_test", from_="07012341234", session=session_mock)
+    agent.connect = AsyncMock()  # type: ignore[method-assign]
+    http_session, session_ctx = _mock_originate_ok()
+    with patch("aiohttp.ClientSession", return_value=session_ctx):
+        await agent.call("07099998888")
+    assert "MachineDetection" not in _posted_body(http_session)
+    for t in agent._prewarm_tasks.values():
+        if not t.done():
+            t.cancel()
+
+
+@pytest.mark.asyncio
+async def test_call_uses_instance_default_machine_detection():
+    """인스턴스 default 가 body 에 반영된다."""
+    session_mock = MagicMock(prewarm=AsyncMock(), attach=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
+    agent = ClawOpsAgent(
+        api_key="sk_test", account_id="AC_test", from_="07012341234",
+        session=session_mock, machine_detection="Hangup",
+    )
+    agent.connect = AsyncMock()  # type: ignore[method-assign]
+    http_session, session_ctx = _mock_originate_ok()
+    with patch("aiohttp.ClientSession", return_value=session_ctx):
+        await agent.call("07099998888")
+    assert _posted_body(http_session)["MachineDetection"] == "Hangup"
+    for t in agent._prewarm_tasks.values():
+        if not t.done():
+            t.cancel()
+
+
+@pytest.mark.asyncio
+async def test_call_arg_overrides_instance_default():
+    """호출 인자가 인스턴스 default 보다 우선한다 (호출 인자 > default)."""
+    session_mock = MagicMock(prewarm=AsyncMock(), attach=AsyncMock(), start=AsyncMock(), stop=AsyncMock())
+    agent = ClawOpsAgent(
+        api_key="sk_test", account_id="AC_test", from_="07012341234",
+        session=session_mock, machine_detection="Hangup",
+    )
+    agent.connect = AsyncMock()  # type: ignore[method-assign]
+    http_session, session_ctx = _mock_originate_ok()
+    with patch("aiohttp.ClientSession", return_value=session_ctx):
+        await agent.call("07099998888", machine_detection="Enable")
+    assert _posted_body(http_session)["MachineDetection"] == "Enable"
+    for t in agent._prewarm_tasks.values():
+        if not t.done():
+            t.cancel()
 
 
 @pytest.mark.asyncio

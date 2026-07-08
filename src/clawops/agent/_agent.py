@@ -57,6 +57,7 @@ class ClawOpsAgent:
         rx_gain: float = 1.0,
         tx_gain: float = 1.0,
         prewarm_enabled: bool = True,
+        machine_detection: Literal["Enable", "Hangup"] | None = None,
     ) -> None:
         if api_key is None:
             api_key = os.environ.get("CLAWOPS_API_KEY")
@@ -84,6 +85,8 @@ class ClawOpsAgent:
         self._rx_gain = self._validate_gain("rx_gain", rx_gain)
         self._tx_gain = self._validate_gain("tx_gain", tx_gain)
         self._prewarm_enabled = prewarm_enabled
+        # 모든 발신에 적용되는 AMD default. call() 인자로 호출별 override 가능.
+        self._machine_detection: Literal["Enable", "Hangup"] | None = machine_detection
 
         if self._tracing is not None:
             setup_tracing(self._tracing)
@@ -202,7 +205,8 @@ class ClawOpsAgent:
             timeout: 발신 ring timeout (초).
             machine_detection: 자동응답기/음성사서함 감지(AMD). ``"Enable"`` 이면 감지 후
                 ``AnsweredBy`` 통보(통화 계속), ``"Hangup"`` 이면 음성사서함 감지 시 자동 종료.
-                ``None`` (기본)이면 비활성.
+                ``None`` (기본)이면 인스턴스 default(생성자의 ``machine_detection``)를 따른다.
+                우선순위: 호출 인자 > 인스턴스 default > 비활성.
         """
         await self.connect()
 
@@ -210,8 +214,9 @@ class ClawOpsAgent:
 
         url = f"{self._base_url}/v1/accounts/{self._account_id}/calls"
         body: dict[str, object] = {"To": to, "From": self._from_number, "Timeout": timeout}
-        if machine_detection in ("Enable", "Hangup"):
-            body["MachineDetection"] = machine_detection
+        effective_md = machine_detection if machine_detection is not None else self._machine_detection
+        if effective_md in ("Enable", "Hangup"):
+            body["MachineDetection"] = effective_md
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
