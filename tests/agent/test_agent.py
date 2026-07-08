@@ -24,6 +24,19 @@ def test_agent_creation():
     assert agent._session._config.system_prompt == "test prompt"
     assert agent._rx_gain == 0.8
     assert agent._tx_gain == 1.2
+    # machine_detection default 는 None (미지정 시 AMD 비활성)
+    assert agent._machine_detection is None
+
+
+def test_agent_machine_detection_default():
+    agent = ClawOpsAgent(
+        api_key="sk_test",
+        account_id="AC_test",
+        from_="07012341234",
+        session=_make_session(),
+        machine_detection="Hangup",
+    )
+    assert agent._machine_detection == "Hangup"
 
 
 def test_agent_tool_decorator():
@@ -221,6 +234,26 @@ async def test_outbound_ready_does_not_double_prewarm_after_ringing():
         first_task.cancel()
 
 
+def _mock_originate_ok():
+    """aiohttp POST → 201 {"callId": "CO1"} 모킹 컨텍스트. (http_session, patch_target)."""
+    resp = MagicMock()
+    resp.status = 201
+    resp.json = AsyncMock(return_value={"callId": "CO1"})
+    post_ctx = MagicMock()
+    post_ctx.__aenter__ = AsyncMock(return_value=resp)
+    post_ctx.__aexit__ = AsyncMock(return_value=False)
+    http_session = MagicMock()
+    http_session.post = MagicMock(return_value=post_ctx)
+    session_ctx = MagicMock()
+    session_ctx.__aenter__ = AsyncMock(return_value=http_session)
+    session_ctx.__aexit__ = AsyncMock(return_value=False)
+    return http_session, session_ctx
+
+
+def _posted_body(http_session) -> dict:
+    return http_session.post.call_args.kwargs["json"]
+
+
 @pytest.mark.asyncio
 async def test_call_starts_prewarm_at_originate():
     """agent.call() 이 originate(POST 201) 직후 prewarm 을 시작한다.
@@ -242,19 +275,7 @@ async def test_call_starts_prewarm_at_originate():
     )
     agent.connect = AsyncMock()  # type: ignore[method-assign]  # control WS 우회
 
-    # aiohttp POST → 201 {"callId": "CO1"} 모킹
-    resp = MagicMock()
-    resp.status = 201
-    resp.json = AsyncMock(return_value={"callId": "CO1"})
-    post_ctx = MagicMock()
-    post_ctx.__aenter__ = AsyncMock(return_value=resp)
-    post_ctx.__aexit__ = AsyncMock(return_value=False)
-    http_session = MagicMock()
-    http_session.post = MagicMock(return_value=post_ctx)
-    session_ctx = MagicMock()
-    session_ctx.__aenter__ = AsyncMock(return_value=http_session)
-    session_ctx.__aexit__ = AsyncMock(return_value=False)
-
+    _http_session, session_ctx = _mock_originate_ok()
     with patch("aiohttp.ClientSession", return_value=session_ctx):
         call = await agent.call("07099998888")
 
@@ -269,6 +290,41 @@ async def test_call_starts_prewarm_at_originate():
     task = agent._prewarm_tasks.get("CO1")
     if task and not task.done():
         task.cancel()
+
+
+async def _originate_body(*, instance_md=None, call_md=None) -> dict:
+    """agent 를 originate 하고 POST body 를 돌려준다.
+
+    prewarm_enabled=False 로 prewarm task/정리를 회피한다. instance_md 는 생성자
+    default, call_md 는 call() 인자로 전달돼 우선순위(call_md > instance_md)를 검증한다.
+    """
+    agent = ClawOpsAgent(
+        api_key="sk_test", account_id="AC_test", from_="07012341234",
+        session=MagicMock(), prewarm_enabled=False, machine_detection=instance_md,
+    )
+    agent.connect = AsyncMock()  # type: ignore[method-assign]
+    http_session, session_ctx = _mock_originate_ok()
+    with patch("aiohttp.ClientSession", return_value=session_ctx):
+        await agent.call("07099998888", machine_detection=call_md)
+    return _posted_body(http_session)
+
+
+@pytest.mark.asyncio
+async def test_call_omits_machine_detection_by_default():
+    """machine_detection 미지정 시 MachineDetection 이 body 에 실리지 않는다."""
+    assert "MachineDetection" not in await _originate_body()
+
+
+@pytest.mark.asyncio
+async def test_call_uses_instance_default_machine_detection():
+    """인스턴스 default 가 body 에 반영된다."""
+    assert (await _originate_body(instance_md="Hangup"))["MachineDetection"] == "Hangup"
+
+
+@pytest.mark.asyncio
+async def test_call_arg_overrides_instance_default():
+    """호출 인자가 인스턴스 default 보다 우선한다 (호출 인자 > default)."""
+    assert (await _originate_body(instance_md="Hangup", call_md="Enable"))["MachineDetection"] == "Enable"
 
 
 @pytest.mark.asyncio
