@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import Any, Awaitable, Callable, Tuple
@@ -67,6 +68,9 @@ class LiveKitSession:
         self._builtin_tools: set[Any] | None = None
         self._tool_registry: ToolRegistry | None = None
         self._http_stack: contextlib.AsyncExitStack | None = None
+        # transcript emit 은 LiveKit 의 동기 이벤트 콜백에서 fire-and-forget 로 돈다.
+        # GC 로 태스크가 사라지지 않게 참조를 잡아둔다.
+        self._emit_tasks: set[asyncio.Task[None]] = set()
 
     # ── ClawOpsAgent 가 duck-typing 으로 부르는 setter ──────────
 
@@ -188,6 +192,8 @@ class LiveKitSession:
         session.output.audio = sync.audio_output
         session.output.transcription = sync.text_output
 
+        self._wire_transcripts(session)
+
         self._agent = agent
         # 우리 도구를 붙이기 전 유저 원본 도구를 스냅샷한다 (attach 재적용 시 누적 방지).
         self._user_tools = list(agent.tools)
@@ -231,6 +237,40 @@ class LiveKitSession:
         self._toolset.set_call(call)
 
         await self._agent.update_tools([*self._user_tools, *bridged, self._toolset])
+
+    def _wire_transcripts(self, session: AgentSession[None]) -> None:
+        """LiveKit 의 최종 대화 항목을 ClawOps `transcript` 훅으로 흘려보낸다.
+
+        네이티브 세션(OpenAI/Gemini/Pipeline)은 `call._emit("transcript", role, text)`
+        를 부른다. `@agent.on("transcript")` 로 트랜스크립트를 모으는 기존 앱이 세션만
+        바꿔도 그대로 돌게 하려면 여기서 같은 계약을 재현해야 한다.
+
+        `conversation_item_added` 는 user·assistant 최종 메시지 양쪽에 대해 히스토리에
+        커밋될 때 한 번씩 뜬다 — 부분(interim) transcript 중복 없이 최종만 얻는다.
+        item 이 AgentHandoff 등 ChatMessage 가 아니면 role 이 없어 자연히 걸러진다.
+        """
+
+        def _on_item(ev: Any) -> None:
+            item = getattr(ev, "item", None)
+            role = getattr(item, "role", None)
+            if role not in ("user", "assistant"):
+                return
+            text = getattr(item, "text_content", None)
+            if not text:
+                return
+            self._forward_transcript(role, text)
+
+        session.on("conversation_item_added", _on_item)
+
+    def _forward_transcript(self, role: str, text: str) -> None:
+        # 동기 콜백에서 async _emit 을 태워야 하므로 태스크로 띄운다. prewarm 중이면
+        # _target 이 _BufferingCall 이라 _emit 이 드롭 카운트로 흡수한다 (무해).
+        target = self._target
+        if target is None:
+            return
+        task = asyncio.create_task(target._emit("transcript", role, text))
+        self._emit_tasks.add(task)
+        task.add_done_callback(self._emit_tasks.discard)
 
 
 def _resolve(session: AgentSession[None], agent: Agent, attr: str) -> Any:
