@@ -17,6 +17,9 @@ pip install clawops[agent,mcp]
 
 # 전체 설치
 pip install clawops[agent-all]
+
+# LiveKit Agents 실행 (실험적) — docs/agent/livekit.md 참조
+pip install 'clawops[livekit]'
 ```
 
 ## 환경변수

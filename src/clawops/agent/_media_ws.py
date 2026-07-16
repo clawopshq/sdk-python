@@ -165,6 +165,11 @@ class MediaWebSocket:
         try:
             await asyncio.wait_for(evt.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            # 마크가 안 왔을 뿐 — 정상 반환한다(호출자에게 raise 하지 않는다).
+            pass
+        finally:
+            # timeout·cancel·정상 완료 모두 waiter 를 회수한다.
+            # (정상 echo 경로에서는 이미 pop 됐으므로 pop(name, None) 은 no-op.)
             self._mark_waiters.pop(name, None)
 
     async def _send_loop(self) -> None:

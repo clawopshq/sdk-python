@@ -135,6 +135,11 @@ class ClawOpsAgent:
         """Control WS에 연결한다. 블로킹하지 않는다."""
         if self._control_ws is not None:
             return
+        # 세션 프로세스 수명 셋업 (있으면). control WS task + 모든 통화 task 의 공통
+        # 조상인 이 시점(root task)에서 돌아야 하는 준비 작업 — 예: LiveKitSession 이
+        # HTTP 플러그인용 http_context 를 여기서 연다.
+        if hasattr(self._session, "session_setup"):
+            await self._session.session_setup()
         await self._ensure_control_ws()
         log.info(f"ClawOpsAgent connected on {self._from_number}")
 
@@ -165,6 +170,9 @@ class ClawOpsAgent:
             self._control_ws_task = None
         self._active_sessions.clear()
         self._call_sessions.clear()
+        # session_setup 의 짝 — 같은 root task 에서 정리한다 (예: http_context 닫기).
+        if hasattr(self._session, "session_teardown"):
+            await self._session.session_teardown()
         log.info("ClawOpsAgent disconnected")
 
     async def _ensure_control_ws(self) -> None:
