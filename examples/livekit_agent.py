@@ -5,13 +5,16 @@ LiveKit 서버도 SIP 도 없이, 관용적인 LiveKit 코드를 실제 ClawOps 
 
 ── 설치 ──────────────────────────────────────────────────────────
     pip install 'clawops[livekit]'
-    pip install 'livekit-plugins-openai' 'livekit-plugins-cartesia'
+    pip install 'livekit-plugins-openai'
+    pip install 'livekit-plugins-xai'        # xAI TTS 를 쓸 때
+    pip install 'livekit-plugins-cartesia'   # Cartesia TTS 를 쓸 때
 
 ── 환경변수 ──────────────────────────────────────────────────────
     export CLAWOPS_API_KEY="sk_..."         # 필수
     export CLAWOPS_ACCOUNT_ID="AC..."        # 필수
     export CLAWOPS_FROM="07012341234"        # 필수 (에이전트가 받을/걸 번호)
     export OPENAI_API_KEY="sk-..."           # 필수 (realtime 모델)
+    export XAI_API_KEY="xai-..."             # 선택 (있으면 음색을 xAI TTS 로)
     export CARTESIA_API_KEY="sk_car_..."     # 선택 (있으면 음색을 Cartesia 로)
 
     # 아웃바운드로 테스트하려면 (없으면 착신 대기)
@@ -23,8 +26,8 @@ LiveKit 서버도 SIP 도 없이, 관용적인 LiveKit 코드를 실제 ClawOps 
     - CLAWOPS_TO 가 없으면: 착신 대기(serve). CLAWOPS_FROM 번호로 전화를 걸면 응답한다.
     - CLAWOPS_TO 가 있으면: 그 번호로 발신한다.
 
-CARTESIA_API_KEY 가 있으면 realtime 모델은 텍스트만 만들고 음성은 Cartesia(sonic-3.5)
-가 낸다. 없으면 OpenAI realtime 이 음성을 직접 낸다.
+음색 선택 우선순위: XAI_API_KEY → CARTESIA_API_KEY → (둘 다 없으면) OpenAI realtime
+이 음성을 직접 낸다. TTS 를 쓰는 경우 realtime 모델은 텍스트만 만든다.
 """
 
 from __future__ import annotations
@@ -81,7 +84,17 @@ class ReceptionAgent(Agent):
 
 
 async def create(call):  # call: CallSession | None (prewarm 중엔 None)
-    if os.environ.get("CARTESIA_API_KEY"):
+    if os.environ.get("XAI_API_KEY"):
+        from livekit.plugins import xai
+
+        # realtime 은 텍스트만, 음성은 xAI TTS 가 낸다 (pip: livekit-plugins-xai).
+        # voice 는 문자열이면 통과한다 — "iris" 는 플러그인 타입 목록엔 없지만 API 는 받는다.
+        session = AgentSession(
+            llm=openai.realtime.RealtimeModel(modalities=["text"]),
+            tts=xai.TTS(voice="iris", language="ko"),
+        )
+        log.info("세션: OpenAI realtime(text) + xAI TTS(iris)")
+    elif os.environ.get("CARTESIA_API_KEY"):
         from livekit.plugins import cartesia
 
         # realtime 은 텍스트만, 음성은 Cartesia 가 낸다.
@@ -118,6 +131,11 @@ async def main() -> None:
     @agent.on("call_end")
     async def _on_end(call) -> None:
         log.info("통화 종료: %s (%.1fs)", call.call_id, call.duration)
+
+    @agent.on("transcript")
+    async def _on_transcript(call, role, text) -> None:
+        # LiveKit 세션이어도 네이티브와 동일하게 최종 발화가 여기로 들어온다.
+        log.info("[transcript] %s: %s", role, text)
 
     to_number = os.environ.get("CLAWOPS_TO")
     if to_number:

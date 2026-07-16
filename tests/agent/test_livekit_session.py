@@ -207,6 +207,71 @@ async def test_clawops_tool_registry_is_bridged() -> None:
     await lk.stop()
 
 
+# ── transcript 훅 브리지 (기존 @agent.on("transcript") 앱 호환) ──
+
+
+async def test_conversation_items_bridge_to_transcript_hook() -> None:
+    """LiveKit 의 최종 대화 항목이 ClawOps `transcript` 훅으로 흘러야 한다.
+
+    네이티브 세션은 call._emit("transcript", role, text) 를 부른다. 세션만 LiveKit 으로
+    바꿔도 @agent.on("transcript") 로 트랜스크립트를 모으는 앱이 그대로 돌아야 한다.
+    """
+    from livekit.agents.llm import ChatMessage
+
+    call = _make_call()
+    got: list[tuple[str, str]] = []
+
+    async def on_tx(c: object, role: str, text: str) -> None:
+        got.append((role, text))
+
+    call._event_handlers = {"transcript": [on_tx]}
+
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    lk._session.emit(  # type: ignore[union-attr]
+        "conversation_item_added",
+        type("E", (), {"item": ChatMessage(role="assistant", content=["안녕하세요"])})(),
+    )
+    lk._session.emit(  # type: ignore[union-attr]
+        "conversation_item_added",
+        type("E", (), {"item": ChatMessage(role="user", content=["영업시간이요"])})(),
+    )
+    # ChatMessage 가 아닌 항목(handoff 등)은 role 이 없어 무시돼야 한다.
+    lk._session.emit(  # type: ignore[union-attr]
+        "conversation_item_added", type("E", (), {"item": object()})()
+    )
+    await asyncio.sleep(0.05)
+
+    assert got == [("assistant", "안녕하세요"), ("user", "영업시간이요")]
+    await lk.stop()
+
+
+async def test_empty_transcript_item_is_skipped() -> None:
+    """빈 text_content 항목은 훅을 부르지 않는다 (빈 transcript 노이즈 방지)."""
+    from livekit.agents.llm import ChatMessage
+
+    call = _make_call()
+    got: list[tuple[str, str]] = []
+
+    async def on_tx(c: object, role: str, text: str) -> None:
+        got.append((role, text))
+
+    call._event_handlers = {"transcript": [on_tx]}
+
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    lk._session.emit(  # type: ignore[union-attr]
+        "conversation_item_added",
+        type("E", (), {"item": ChatMessage(role="assistant", content=[""])})(),
+    )
+    await asyncio.sleep(0.05)
+
+    assert got == []
+    await lk.stop()
+
+
 # ── 내장 도구 on/off ────────────────────────────────────────────
 
 
