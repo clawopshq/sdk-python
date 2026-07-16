@@ -43,6 +43,12 @@ class _BufferingCall:
     async def send_audio(self, chunk: bytes) -> None:
         self._buffer.append(chunk)
 
+    async def clear_audio(self) -> None:
+        # prewarm 중 barge-in/truncation 시 버퍼링된 인사말 오디오를 버린다.
+        # 모든 세션(OpenAI/Gemini/Pipeline/LiveKit)이 attach 전에 self._call.clear_audio()
+        # 를 호출할 수 있으므로 CallSession.clear_audio 계약을 그대로 미러한다.
+        self._buffer.clear()
+
     async def _emit(self, *args: Any, **kwargs: Any) -> None:
         # 첫 인자가 event name 이라고 가정 (CallSession._emit 시그니처와 일치).
         event_name = "?"

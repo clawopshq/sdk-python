@@ -68,6 +68,11 @@ xai = ["clawops[agent]", "openai>=1.0.0"]
 deepgram = ["clawops[agent]", "deepgram-sdk>=3.0.0"]
 elevenlabs = ["clawops[agent]", "elevenlabs>=1.0.0"]
 google-tts = ["clawops[agent]", "google-cloud-texttospeech>=2.0.0"]
+# LiveKit Agents 를 ClawOps 전화망에 얹는다 (room 없이).
+# LLM/STT/TTS 플러그인은 유저가 직접 단다: livekit-agents[openai,cartesia] 등.
+# agent-all 에는 넣지 않는다 — livekit 은 ~208MB 네이티브 바이너리를 끌어오고
+# Alpine(musllinux) 휠이 없어서, 원치 않는 소비자에게 강제할 수 없다 (ollama 와 동일).
+livekit = ["clawops[agent]", "livekit-agents>=1.6.5"]
 mcp = ["clawops[agent]", "mcp>=1.0.0"]
 tracing = ["opentelemetry-api>=1.20.0"]
 agent-all = [

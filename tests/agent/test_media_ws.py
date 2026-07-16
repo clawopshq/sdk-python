@@ -1,8 +1,56 @@
 # tests/agent/test_media_ws.py
 import base64
-import json
+from unittest.mock import AsyncMock
+
 import pytest
-from clawops.agent._media_ws import parse_media_event, build_media_response, parse_start_event
+from clawops.agent._media_ws import (
+    MediaWebSocket,
+    build_media_response,
+    parse_media_event,
+    parse_start_event,
+)
+
+
+def _fake_ws() -> MediaWebSocket:
+    ws = MediaWebSocket(
+        url="ws://x", api_key="k", on_audio=AsyncMock(), on_start=AsyncMock(), on_stop=AsyncMock()
+    )
+
+    class _Open:
+        closed = False
+
+    ws._ws = _Open()  # type: ignore[assignment]
+    return ws
+
+
+@pytest.mark.asyncio
+async def test_wait_for_mark_timeout_does_not_raise_and_pops_waiter():
+    """마크가 안 와도 wait_for_mark 는 raise 하지 않고 waiter 를 회수해야 한다.
+
+    (예전 finally-only 버전은 TimeoutError 를 전파해 _graceful_hangup 과
+    _race_interrupt 를 깨뜨렸다.)
+    """
+    ws = _fake_ws()
+
+    await ws.wait_for_mark("m1", timeout=0.02)  # raise 하면 이 줄에서 실패
+
+    assert "m1" not in ws._mark_waiters  # timeout 경로에서도 회수됨
+
+
+@pytest.mark.asyncio
+async def test_wait_for_mark_echo_resolves_and_pops():
+    ws = _fake_ws()
+
+    import asyncio
+
+    async def echo():
+        await asyncio.sleep(0.01)
+        ws._mark_waiters["m2"].set()
+
+    task = asyncio.create_task(echo())
+    await ws.wait_for_mark("m2", timeout=1.0)
+    await task
+    assert "m2" not in ws._mark_waiters
 
 
 def test_parse_media_event():
