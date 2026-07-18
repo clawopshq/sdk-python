@@ -50,6 +50,31 @@ class CallSession:
         self._dtmf_collector_active: bool = False
         self._dtmf_queue: asyncio.Queue[str] = asyncio.Queue()
 
+    def bind_transport(
+        self,
+        *,
+        send_audio: Callable[[bytes], Awaitable[None]],
+        send_clear: Callable[[], Awaitable[None]],
+        hangup: Callable[[], Awaitable[None]],
+        send_dtmf: Callable[[str], Awaitable[None]] | None = None,
+        media_ws: Any | None = None,
+        transfer: Callable[[dict], Awaitable[dict]] | None = None,
+    ) -> None:
+        """Wire the audio/DTMF/hangup transport for this call.
+
+        Public composition point for servers that drive a call from an already-open
+        media transport (e.g. a mediaUrl-dispatched worker) instead of going through
+        ClawOpsAgent's control WS. Encapsulates the transport-binding fields so callers
+        never assign the private ``_send_audio_fn`` / ``_media_ws`` / ... attributes.
+        ``transfer`` is optional and only needed when the caller can service transfers.
+        """
+        self._send_audio_fn = send_audio
+        self._send_clear_fn = send_clear
+        self._hangup_fn = hangup
+        self._send_dtmf_fn = send_dtmf
+        self._media_ws = media_ws
+        self._transfer_fn = transfer
+
     @property
     def metrics(self) -> CallMetrics:
         return self._metrics
