@@ -9,11 +9,18 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from typing import Any, Callable, Awaitable
 
 import aiohttp
 
 log = logging.getLogger("clawops.agent")
+
+# 죽은 피어(FIN/RST 없이 사라진 TCP: NAT idle timeout·네트워크 분단·콜노드 강제종료)를
+# 감지하려면 WS keepalive 가 필요하다. 없으면 `stop` 프레임이 영영 안 와 수신 루프가 무한
+# 블록되고, 서버 러너에서는 그 워커 슬롯이 영구 점유된다. aiohttp 는 ping 을 보내고 pong 이
+# 이 시간 내 안 오면 연결을 닫는다(수신 루프가 깨져 정상 정리로 이어짐).
+MEDIA_WS_HEARTBEAT_S = 30.0
 
 
 def parse_start_event(data: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +96,7 @@ class MediaWebSocket:
         self._ws = await self._session.ws_connect(
             self._url,
             headers={"Authorization": f"Bearer {self._api_key}"},
+            heartbeat=MEDIA_WS_HEARTBEAT_S,
         )
         log.info(f"Media WS connected: {self._url}")
         self._send_task = asyncio.create_task(self._send_loop())
@@ -184,6 +192,20 @@ class MediaWebSocket:
                     await self._ws.send_str(json.dumps(msg))
         except asyncio.CancelledError:
             pass
+
+    async def graceful_close(self) -> None:
+        """Drain queued audio, wait for it to play out, then close.
+
+        The hangup handshake: flush the send queue, send a mark, wait for the
+        server to echo it back (so trailing audio finishes playing), then close.
+        Shared by ``ClawOpsAgent`` and mediaUrl-dispatched server runners so the
+        hangup protocol lives in one place.
+        """
+        await self.flush()
+        mark_name = f"hangup-{int(time.time() * 1000)}"
+        await self.send_mark(mark_name)
+        await self.wait_for_mark(mark_name, timeout=5.0)
+        await self.close()
 
     async def close(self) -> None:
         self._audio_queue.put_nowait(None)

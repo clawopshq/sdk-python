@@ -392,22 +392,14 @@ class ClawOpsAgent:
                     recorder.write_outbound(ulaw_to_pcm16(ulaw), media_ts_ms=latest_media_ts)
                 await media_ws.send_audio(ulaw)
 
-            call._send_audio_fn = send_audio
-            call._send_clear_fn = media_ws.send_clear
-
-            async def _graceful_hangup() -> None:
-                import time
-
-                await media_ws.flush()
-                mark_name = f"hangup-{int(time.time() * 1000)}"
-                await media_ws.send_mark(mark_name)
-                await media_ws.wait_for_mark(mark_name, timeout=5.0)
-                await media_ws.close()
-
-            call._hangup_fn = _graceful_hangup
-            call._send_dtmf_fn = media_ws.send_dtmf
-            call._media_ws = media_ws
-            call._transfer_fn = lambda params: self._control_ws.request_transfer(call.call_id, params)
+            call.bind_transport(
+                send_audio=send_audio,
+                send_clear=media_ws.send_clear,
+                hangup=media_ws.graceful_close,
+                send_dtmf=media_ws.send_dtmf,
+                media_ws=media_ws,
+                transfer=lambda params: self._control_ws.request_transfer(call.call_id, params),
+            )
 
             self._call_sessions[call.call_id] = session
 
