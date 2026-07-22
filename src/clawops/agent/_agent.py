@@ -585,18 +585,30 @@ class ClawOpsAgent:
         call = self._active_sessions.get(call_id)
         if call:
             call.status = reason
+            call.ended_status = reason
             log.info(f"Outbound call failed: {call_id} ({reason})")
             await call._emit("call_failed", reason)
-            call._mark_ended()
+            call._mark_ended(reason)
             self._active_sessions.pop(call_id, None)
         await self._cleanup_prewarm(call_id)
 
     async def _handle_ended(self, data: dict[str, Any]) -> None:
         call_id = data.get("callId", "")
+        # 서버는 종료 사유를 status 로 싣는다(completed/no-answer/busy/rejected/canceled/
+        # failed). 예전에는 이 값을 버리고 전부 'completed' 로 표시해 상대가 받지 않은
+        # 통화를 성사된 통화와 구분할 수 없었다.
+        status = data.get("status") or "completed"
         call = self._active_sessions.get(call_id)
-        log.info(f"Call ended (server): {call_id}")
+        log.info(f"Call ended (server): {call_id} (status={status})")
         if call:
-            call._mark_ended()
+            call.status = status
+            call.ended_status = status
+            if status != "completed":
+                # 미연결 종료. call_start 가 없었으므로 call_end 도 발화되지 않는다 —
+                # 이 이벤트가 발신 실패를 알 수 있는 유일한 통로다.
+                log.info(f"Outbound call not connected: {call_id} ({status})")
+                await call._emit("call_failed", status)
+            call._mark_ended(status)
         self._active_sessions.pop(call_id, None)
         self._call_sessions.pop(call_id, None)
         await self._cleanup_prewarm(call_id)

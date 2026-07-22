@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.37.0 (2026-07-22)
+
+### Fixed
+- **발신 결과가 통보되지 않던 문제.** 서버는 `call.ended` 에 종료 사유를 `status` 로 싣지만 `_handle_ended` 가 이 값을 버리고 `_mark_ended()` 가 항상 `"completed"` 를 하드코딩해, **상대가 받지 않은 통화(무응답)가 성사된 통화와 구분되지 않았다.** `await session.wait()` 가 조용히 리턴하고 `status` 도 `completed` 라서 발신 실패를 코드로 감지할 방법이 아예 없었다. 이제 서버가 통보한 종료 사유(`completed` / `no-answer` / `busy` / `rejected` / `canceled` / `failed`)를 그대로 반영한다.
+- `Call.status` 의 `Literal` 이 `queued`/`ringing`/`in-progress`/`completed`/`failed` 5종만 허용해, 정작 진단이 필요한 **무응답·통화중·거절 통화를 `client.calls.get()` 으로 조회하면 `ValidationError` 로 실패**했다. 서버가 실제로 반환하는 9종 전부를 허용하도록 넓혔다.
+
+### Added
+- `CallSession.ended_status` — 서버가 통보한 최종 종료 사유. 통화가 끝나기 전에는 `None`. `completed` 만이 실제로 연결된 통화를 의미한다.
+- `call_failed` 이벤트가 실제로 발화된다. 통화가 **연결되지 못하고** 끝났을 때 `(call, reason)` 으로 호출되며 `reason` 은 `ended_status` 와 같다. 이전에는 서버가 보내지 않는 `call.failed` 에만 묶여 있어 영원히 호출되지 않는 죽은 API 였다. 이제 발신 한 건은 반드시 `call_start`+`call_end`(연결됨) 또는 `call_failed`(미연결) 중 한쪽으로 끝난다.
+
 ## 0.36.0 (2026-07-18)
 
 ### Added

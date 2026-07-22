@@ -13,7 +13,10 @@ class Call(BaseModel):
 
     Attributes:
         call_id: 통화 고유 식별자 (예: 'CAabcdef1234567890').
-        status: 통화 상태. queued, ringing, in-progress, completed, failed 중 하나.
+        status: 통화 상태. 진행 중은 queued / ringing / in-progress, 종료 상태는
+            completed(응답 후 정상 종료) / no-answer(벨은 울렸으나 무응답) /
+            busy(통화중) / rejected(수신 거절) / canceled(응답 전 발신 측 취소) /
+            failed(시스템·망 오류). completed 만이 실제로 연결된 통화를 의미한다.
         to: 수신 전화번호 또는 SIP URI.
         from_: 발신 전화번호 (계정에 등록된 번호).
         direction: 통화 방향. outbound 또는 inbound.
@@ -30,7 +33,17 @@ class Call(BaseModel):
     """
 
     call_id: str
-    status: Literal["queued", "ringing", "in-progress", "completed", "failed"]
+    status: Literal[
+        "queued",
+        "ringing",
+        "in-progress",
+        "completed",
+        "failed",
+        "busy",
+        "no-answer",
+        "canceled",
+        "rejected",
+    ]
     to: str
     from_: str
     direction: Literal["outbound", "inbound"]

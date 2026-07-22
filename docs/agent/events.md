@@ -18,6 +18,11 @@ async def on_call_end(call):
 async def on_transcript(call, role, text):
     print(f"[{role}] {text}")
     # role: "user" (고객 음성 인식) 또는 "assistant" (AI 응답)
+
+@agent.on("call_failed")
+async def on_failed(call, reason):
+    print(f"통화 미연결: {reason}")
+    # reason: "no-answer" / "busy" / "rejected" / "canceled" / "failed"
 ```
 
 ### 이벤트 목록
@@ -26,16 +31,22 @@ async def on_transcript(call, role, text):
 |--------|----------|------|
 | `call_start` | `(call)` | 통화 시작 — **상대가 받은 뒤** 미디어 세션이 열릴 때 |
 | `call_end` | `(call)` | 통화 종료 — `call_start` 가 발화된 통화만 |
+| `call_failed` | `(call, reason)` | 통화가 **연결되지 못하고** 종료됨. `reason` 은 종료 사유 |
 | `transcript` | `(call, role, text)` | 음성 텍스트 생성 |
 | `dtmf` | `(call, digit)` | DTMF 키 입력 수신 |
 
-> **주의 — 연결되지 않은 통화에서는 아무 이벤트도 발화되지 않습니다.**
-> `call_start`/`call_end` 는 통화가 **응답된 뒤** 열리는 미디어 세션에 묶여 있습니다. 상대가 받지 않았거나
-> (무응답) 통화중·거절이면 두 이벤트 모두 발화되지 않고, `await call.wait()` 만 조용히 리턴합니다.
->
-> SDK 에 `call_failed` 이벤트 타입이 정의되어 있지만 **현재 서버는 이 이벤트를 보내지 않습니다.**
-> 핸들러를 등록해도 호출되지 않으니 발신 실패 감지에 사용하지 마세요.
-> 발신 결과는 [발신 결과 확인하기](quickstart.md#발신-결과-확인하기) 를 참고하세요.
+`call_start`/`call_end` 는 통화가 **응답된 뒤** 열리는 미디어 세션에 묶여 있습니다. 상대가 받지 않았거나
+(무응답) 통화중·거절이면 이 두 이벤트는 발화되지 않고, 대신 **`call_failed` 가 발화**됩니다.
+즉 발신 한 건은 반드시 `call_start`+`call_end` 또는 `call_failed` 중 한쪽으로 끝납니다.
+
+| 결과 | 발화되는 이벤트 |
+|------|-----------------|
+| 상대가 받고 통화 종료 | `call_start` → `call_end` |
+| 무응답 · 통화중 · 거절 · 취소 | `call_failed` |
+| 연결됐으나 시스템 오류로 종료 | `call_start` → `call_end` + `call_failed`(`reason="failed"`) |
+
+> `reason` 값은 `call.ended_status` 와 동일합니다. 자세한 의미는
+> [발신 결과 확인하기](quickstart.md#발신-결과-확인하기) 를 참고하세요.
 
 ## CallSession
 
@@ -50,23 +61,41 @@ async def on_transcript(call, role, text):
 | `to_number` | `str` | 수신 번호 |
 | `account_id` | `str` | 계정 ID |
 | `direction` | `str` | `"inbound"` 또는 `"outbound"` |
-| `status` | `str` | 아래 표 참고 |
+| `status` | `str` | 현재 상태. 아래 표 참고 |
+| `ended_status` | `str \| None` | 종료 사유. 통화가 끝나기 전에는 `None` |
 | `start_time` | `datetime` | 통화 시작 시간 |
 | `duration` | `float` | 통화 경과 시간 (초) |
 | `metadata` | `dict` | 사용자 정의 메타데이터 |
 
-#### `status` 값
+#### `status` / `ended_status` 값
+
+통화가 진행되는 동안 `status` 는 아래처럼 바뀝니다.
 
 | 값 | 시점 |
 |----|------|
 | `queued` | 발신(outbound) 세션 생성 직후 |
 | `ringing` | 수신(inbound) 세션 생성 직후 / 발신은 통신망이 벨 신호를 올렸을 때 |
 | `in-progress` | 발신 통화가 응답되어 미디어 세션이 열릴 때 |
-| `completed` | **통화가 끝났을 때 — 응답 여부와 무관** |
 
-> **주의:** `status` 는 SDK 내부 진행 상태이며 최종 결과가 아닙니다. 상대가 받지 않아 무응답으로 끝난 통화도
-> `completed` 가 됩니다. `no-answer` / `busy` / `rejected` 같은 실제 종료 사유는
-> [발신 결과 확인하기](quickstart.md#발신-결과-확인하기) 를 참고하세요.
+통화가 끝나면 `status` 와 `ended_status` 모두 아래 종료 사유 중 하나가 됩니다.
+
+| 값 | 의미 |
+|----|------|
+| `completed` | 상대가 받았고 통화가 정상 종료됨 |
+| `no-answer` | 벨은 울렸으나 받지 않음 (`timeout` 초과로 발신 취소) |
+| `busy` | 통화중 |
+| `rejected` | 상대가 거절 |
+| `canceled` | 상대가 받기 전에 발신 측이 취소 |
+| `failed` | 시스템/네트워크 오류 |
+
+**`completed` 만이 실제로 연결된 통화를 의미합니다.**
+
+```python
+session = await agent.call("01012345678")
+await session.wait()
+if session.ended_status != "completed":
+    print(f"통화 미연결: {session.ended_status}")
+```
 
 ### 메서드
 
@@ -83,4 +112,4 @@ async def on_start(call):
 ```
 
 > `await call.wait()`는 통화가 종료될 때까지 대기합니다. 주로 아웃바운드 단건 발신 시 통화가 끝나기를 기다리는 데 사용합니다.
-> **상대가 받지 않아도(무응답) 발신 취소 시점에 리턴하며, 리턴했다는 사실만으로는 통화 성사 여부를 알 수 없습니다.**
+> 상대가 받지 않아도(무응답) 발신 취소 시점에 리턴하므로, **성사 여부는 리턴 후 `call.ended_status` 로 확인**하세요.

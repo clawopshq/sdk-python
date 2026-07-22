@@ -106,14 +106,20 @@ print(certifi.where())
 
 ### 1단계 — 통화가 통신망까지 갔는지 확인
 
-먼저 통화 상태를 조회합니다. ([발신 결과 확인하기](quickstart.md#발신-결과-확인하기))
+먼저 종료 사유를 확인합니다. ([발신 결과 확인하기](quickstart.md#발신-결과-확인하기))
 
-| `status` | 해석 |
+```python
+session = await agent.call("01012345678", timeout=60)
+await session.wait()
+print(session.ended_status)
+```
+
+| `ended_status` | 해석 |
 | --- | --- |
 | `no-answer` | **통신망까지 정상 전달되어 벨 신호까지 올라갔으나 응답이 없었음.** 아래 2단계로. |
 | `busy` / `rejected` | 상대 단말이 통화중이거나 거절 |
 | `failed` | 시스템/네트워크 오류 — 문의 바랍니다 |
-| `queued` 에서 멈춤 | 발신 자체가 시작되지 않음 — 번호·권한 문제 |
+| `None` 인 채로 대기 | 발신 자체가 시작되지 않음 — 번호·권한 문제 |
 
 통화 이벤트 조회 API(`GET /v1/accounts/{accountId}/calls/{callId}/events`)로 더 자세한 진행 내역을 볼 수 있습니다.
 

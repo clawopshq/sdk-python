@@ -29,6 +29,9 @@ class CallSession:
         self.account_id = account_id
         self.direction = direction
         self.status: str = "queued" if direction == "outbound" else "ringing"
+        # 서버가 통보한 최종 종료 상태. 통화가 끝나기 전에는 None.
+        # completed(성사) / no-answer / busy / rejected / canceled / failed.
+        self.ended_status: str | None = None
         self.start_time = datetime.now()
         self.metadata: dict[str, Any] = {}
 
@@ -104,9 +107,22 @@ class CallSession:
         """통화가 종료될 때까지 대기한다."""
         await self._ended_event.wait()
 
-    def _mark_ended(self) -> None:
-        """통화 종료를 알린다. (내부 전용)"""
-        self.status = "completed"
+    def _mark_ended(self, status: str | None = None) -> None:
+        """통화 종료를 알린다. (내부 전용)
+
+        Args:
+            status: 서버가 통보한 최종 상태(completed/no-answer/busy/rejected/
+                canceled/failed). 주어지면 그대로 확정한다 — 상대가 받지 않은 통화를
+                'completed' 로 뭉개지 않기 위함이다. 생략하면 미디어 세션 정리 경로에서의
+                호출이므로, 아직 종료 전일 때만 'completed' 로 채우고 이미 확정된 서버
+                상태는 덮어쓰지 않는다.
+        """
+        if status is not None:
+            self.status = status
+            self.ended_status = status
+        elif not self._ended_event.is_set():
+            self.status = "completed"
+            self.ended_status = "completed"
         self._ended_event.set()
 
     async def _emit(self, event: str, *args: Any) -> None:

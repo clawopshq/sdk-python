@@ -438,3 +438,100 @@ def test_agent_rejects_invalid_gain():
             session=_make_session(),
             tx_gain=float("inf"),
         )
+
+
+# ── 종료 상태 통보 (call.ended 의 status 반영) ──────────────────────────────
+# 배경: 서버는 call.ended 에 종료 사유를 status 로 싣지만 예전 _handle_ended 는 이 값을
+# 버리고 전부 'completed' 로 표시했다. 상대가 받지 않은 통화(no-answer)가 성사된 통화와
+# 구분되지 않아, 발신 결과를 SDK 만으로는 알 수 없었다.
+
+
+def _terminal_agent():
+    return ClawOpsAgent(
+        api_key="sk_test",
+        account_id="AC_test",
+        from_="07012341234",
+        session=MagicMock(prewarm=AsyncMock(), stop=AsyncMock()),
+    )
+
+
+async def _register_outbound(agent, call_id):
+    from clawops.agent._session import CallSession
+
+    call = CallSession(
+        call_id=call_id,
+        from_number="07012341234",
+        to_number="01012345678",
+        account_id="AC_test",
+        direction="outbound",
+    )
+    agent._active_sessions[call_id] = call
+    return call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["no-answer", "busy", "rejected", "canceled", "failed"])
+async def test_ended_reports_terminal_status(status):
+    """미연결 종료는 status/ended_status 에 실제 사유가 남고 call_failed 가 발화된다."""
+    agent = _terminal_agent()
+    call = await _register_outbound(agent, "CT1")
+
+    seen: list[str] = []
+
+    async def _on_failed(_call, reason):
+        seen.append(reason)
+
+    call.on("call_failed", _on_failed)
+
+    await agent._handle_ended({"callId": "CT1", "status": status})
+
+    assert call.status == status
+    assert call.ended_status == status
+    assert seen == [status]
+    # wait() 는 무응답에서도 반드시 풀려야 한다(행 방지).
+    await asyncio.wait_for(call.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_ended_completed_does_not_emit_call_failed():
+    """성사된 통화에서는 call_failed 가 발화되지 않는다."""
+    agent = _terminal_agent()
+    call = await _register_outbound(agent, "CT2")
+
+    seen: list[str] = []
+
+    async def _on_failed(_call, reason):
+        seen.append(reason)
+
+    call.on("call_failed", _on_failed)
+
+    await agent._handle_ended({"callId": "CT2", "status": "completed"})
+
+    assert call.status == "completed"
+    assert call.ended_status == "completed"
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_ended_without_status_defaults_to_completed():
+    """status 가 없는 구버전 서버 이벤트는 completed 로 간주한다(하위호환)."""
+    agent = _terminal_agent()
+    call = await _register_outbound(agent, "CT3")
+
+    await agent._handle_ended({"callId": "CT3"})
+
+    assert call.status == "completed"
+    assert call.ended_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_media_cleanup_does_not_overwrite_server_status():
+    """미디어 세션 정리의 인자 없는 _mark_ended() 가 서버 종료 사유를 덮어쓰지 않는다."""
+    agent = _terminal_agent()
+    call = await _register_outbound(agent, "CT4")
+
+    await agent._handle_ended({"callId": "CT4", "status": "no-answer"})
+    call._mark_ended()  # 미디어 정리 경로(응답된 통화에서만 실행되지만 방어)
+
+    assert call.status == "no-answer"
+    assert call.ended_status == "no-answer"
