@@ -159,6 +159,9 @@ agent = ClawOpsAgent(
 ## 발신 (Outbound Call)
 
 ```python
+from clawops.agent import ClawOpsAgent, OpenAIRealtime
+import asyncio
+
 async def main():
     agent = ClawOpsAgent(
         from_="07012345678",
@@ -168,10 +171,10 @@ async def main():
     )
 
     # 발신만 하는 경우 — 자동으로 connect() 수행
-    session = await agent.call("01012345678", timeout=30)
+    session = await agent.call("01012345678", timeout=60)
     print(session.call_id)     # 즉시 사용 가능
     print(session.direction)   # "outbound"
-    await session.wait()       # 통화 종료까지 대기
+    await session.wait()       # 통화가 끝날 때까지 대기 (무응답이어도 리턴)
     await agent.disconnect()
 
     # 수신도 같이 하는 경우 (혼합 모드)
@@ -185,8 +188,70 @@ asyncio.run(main())
 | 파라미터            | 타입  | 기본값 | 설명                                                                                                  |
 | ------------------- | ----- | ------ | ----------------------------------------------------------------------------------------------------- |
 | `to`                | `str` | 필수   | 수신 전화번호                                                                                          |
-| `timeout`           | `int` | `60`   | 무응답 대기 시간 (초)                                                                                  |
+| `timeout`           | `int` | `60`   | 상대방이 받지 않을 때 발신을 취소하기까지의 대기 시간 (초)                                             |
 | `machine_detection` | `str` | 없음   | 음성사서함 감지(AMD). `"Enable"`=결과만 통보(통화 계속), `"Hangup"`=사서함 감지 시 자동 종료. 결과는 통화 조회의 `answered_by` 와 status callback 의 `AnsweredBy` 로 확인 |
+
+### 발신 결과 확인하기
+
+> **주의:** 현재 SDK는 발신이 성사됐는지 알려주지 않습니다. `await session.wait()` 는 통화가 끝나면 리턴하지만,
+> 상대가 받지 않았어도(무응답) 똑같이 리턴하고 `session.status` 는 `"completed"` 가 됩니다.
+> 무응답·통화중·거절 통화에서는 `call_end` 도 `call_failed` 도 발화되지 않습니다.
+> 발신 결과는 아래 방법으로 확인하세요. (SDK 개선 예정)
+
+가장 확실한 방법은 통화 조회 API 입니다. `status` 가 실제 종료 사유를 담고 있습니다.
+
+```python
+import os, aiohttp
+
+async def get_call_status(call_id: str) -> str:
+    account_id = os.environ["CLAWOPS_ACCOUNT_ID"]
+    url = f"https://api.claw-ops.com/v1/accounts/{account_id}/calls/{call_id}"
+    headers = {"Authorization": f"Bearer {os.environ['CLAWOPS_API_KEY']}"}
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url, headers=headers) as r:
+            return (await r.json())["status"]
+
+# 사용 예
+session = await agent.call("01012345678", timeout=60)
+await session.wait()
+print(await get_call_status(session.call_id))   # "completed" / "no-answer" / "busy" / ...
+```
+
+| `status` | 의미 |
+| --- | --- |
+| `completed` | 상대가 받았고 통화가 정상 종료됨 |
+| `no-answer` | 벨은 울렸으나 받지 않음 (`timeout` 초과로 발신 취소) |
+| `busy` | 통화중 |
+| `rejected` | 상대가 거절 |
+| `canceled` | 상대가 받기 전에 발신 측이 취소 |
+| `failed` | 시스템/네트워크 오류 |
+
+더 자세한 진행 내역(통신망 응답, 벨 울림 여부 등)은 대시보드의 통화 상세 화면이나
+통화 이벤트 조회 API(`GET /v1/accounts/{accountId}/calls/{callId}/events`)에서 볼 수 있습니다.
+
+> **주의:** `clawops` REST 클라이언트(`client.calls.get()`)는 현재 `status` 를
+> `queued`/`ringing`/`in-progress`/`completed`/`failed` 로만 검증하기 때문에, 무응답·통화중·거절 통화를 조회하면
+> `ValidationError` 가 발생합니다. 수정 전까지는 위 예제처럼 HTTP 로 직접 조회하세요.
+
+### 번호 하나당 프로세스 하나
+
+플랫폼은 **발신번호 1개당 Agent 연결(control WebSocket) 1개**만 유지합니다.
+같은 번호로 새 연결이 들어오면 기존 연결은 즉시 끊깁니다.
+
+```
+[프로세스 A] agent.serve()          ← 수신 대기 중
+[프로세스 B] agent.call("010...")   ← 같은 번호로 연결 → A 가 끊기고 B 가 소유권 획득
+```
+
+이 상태에서 발신하면 통화가 응답된 직후 아래 오류로 끊길 수 있습니다.
+
+```
+AGENT_SESSION_INIT_FAILED
+SDK 의 _active_sessions 에 callId 가 없습니다.
+```
+
+수신과 발신을 함께 하려면 **하나의 프로세스에서** `await agent.connect()` 후 `agent.call()` 을 호출하세요
+(위 "혼합 모드" 예제). 발신 스크립트를 여러 번 실행할 때는 이전 프로세스가 완전히 종료됐는지 확인하세요.
 
 ## 에러 처리
 
