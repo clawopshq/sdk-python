@@ -6,145 +6,16 @@ from typing_extensions import Required, TypedDict
 
 from .._utils import PropertyInfo
 
-# ── Provider별 모델/음성 타입 ────────────────────────────────────────────────
-
-OpenAIRealtimeModel = Union[Literal["gpt-realtime"], str]
-"""OpenAI Realtime 모델. 자유 입력도 허용."""
-
-OpenAIVoice = Union[
-    Literal["alloy", "ash", "ballad", "coral", "echo", "fable", "marin", "sage", "shimmer", "verse"],
-    str,
-]
-"""OpenAI 음성 ID. 자유 입력도 허용."""
-
-GeminiRealtimeModel = Union[Literal["gemini-3.1-flash-live-preview"], str]
-"""Gemini Realtime 모델. 자유 입력도 허용."""
-
-GeminiVoice = Union[
-    Literal[
-        "Puck",
-        "Zephyr",
-        "Kore",
-        "Orus",
-        "Autonoe",
-        "Umbriel",
-        "Erinome",
-        "Laomedeia",
-        "Schedar",
-        "Achird",
-        "Sadachbia",
-        "Fenrir",
-        "Aoede",
-        "Enceladus",
-        "Algieba",
-        "Algenib",
-        "Achernar",
-        "Gacrux",
-        "Zubenelgenubi",
-        "Sadaltager",
-        "Charon",
-        "Leda",
-        "Callirrhoe",
-        "Iapetus",
-        "Despina",
-        "Rasalgethi",
-        "Alnilam",
-        "Pulcherrima",
-        "Vindemiatrix",
-        "Sulafat",
-    ],
-    str,
-]
-"""Gemini 음성 ID. 자유 입력도 허용."""
-
-
-# ── Provider별 AI 설정 ───────────────────────────────────────────────────────
-
-
-class OpenAIAIConfigParam(TypedDict, total=False):
-    """OpenAI provider AI 설정.
-
-    ``provider='openai'``\\ 일 때 사용합니다.
-    """
-
-    provider: Required[Annotated[Literal["openai"], PropertyInfo(alias="Provider")]]
-    """AI 제공자."""
-
-    model: Required[Annotated[OpenAIRealtimeModel, PropertyInfo(alias="Model")]]
-    """OpenAI Realtime 모델. ``'gpt-realtime'``, ``'gpt-4o-mini-realtime'`` 등."""
-
-    api_key: Required[Annotated[str, PropertyInfo(alias="ApiKey")]]
-    """OpenAI API 키."""
-
-    voice: Annotated[OpenAIVoice, PropertyInfo(alias="Voice")]
-    """OpenAI 음성 ID (기본값: ``'marin'``). alloy, ash, ballad, coral, echo, fable, marin, sage, shimmer, verse."""
-
-    language: Annotated[str, PropertyInfo(alias="Language")]
-    """언어 코드 (기본값: ``'ko'``)."""
-
-    messages: Annotated[list[dict[str, str]], PropertyInfo(alias="Messages")]
-    """초기 메시지. ``[{"role": "system", "content": "..."}]``"""
-
-    tools: Annotated[list[dict], PropertyInfo(alias="Tools")]
-    """Function calling 도구 정의."""
-
-    greeting: Annotated[bool, PropertyInfo(alias="Greeting")]
-    """AI가 먼저 인사할지 여부 (기본값: ``True``)."""
-
-    turn_detection: Annotated[dict, PropertyInfo(alias="TurnDetection")]
-    """턴 감지 설정 (기본값: semantic_vad medium)."""
-
-
-class GeminiAIConfigParam(TypedDict, total=False):
-    """Gemini provider AI 설정.
-
-    ``provider='gemini'``\\ 일 때 사용합니다.
-    """
-
-    provider: Required[Annotated[Literal["gemini"], PropertyInfo(alias="Provider")]]
-    """AI 제공자."""
-
-    model: Required[Annotated[GeminiRealtimeModel, PropertyInfo(alias="Model")]]
-    """Gemini Realtime 모델. ``'gemini-3.1-flash-live-preview'`` 등."""
-
-    api_key: Required[Annotated[str, PropertyInfo(alias="ApiKey")]]
-    """Google API 키."""
-
-    voice: Annotated[GeminiVoice, PropertyInfo(alias="Voice")]
-    """Gemini 음성 ID. Puck, Zephyr, Kore, Orus, Autonoe, Umbriel, Erinome 등."""
-
-    language: Annotated[str, PropertyInfo(alias="Language")]
-    """언어 코드 (기본값: ``'ko'``)."""
-
-    messages: Annotated[list[dict[str, str]], PropertyInfo(alias="Messages")]
-    """초기 메시지. ``[{"role": "system", "content": "..."}]``"""
-
-    tools: Annotated[list[dict], PropertyInfo(alias="Tools")]
-    """Function calling 도구 정의."""
-
-    greeting: Annotated[bool, PropertyInfo(alias="Greeting")]
-    """AI가 먼저 인사할지 여부 (기본값: ``True``)."""
-
-    realtime_input_config: Annotated[dict, PropertyInfo(alias="RealtimeInputConfig")]
-    """Gemini VAD 설정. google-genai SDK의 ``RealtimeInputConfig`` 구조 그대로 전달."""
-
-
-
-AIConfigParam = Union[OpenAIAIConfigParam, GeminiAIConfigParam]
-"""AI Completion 모드 설정. ``provider`` 값에 따라 ``model``\\과 ``voice``\\가 달라집니다."""
-
-
 # ── Call API 파라미터 ────────────────────────────────────────────────────────
 
 
 class CallCreateParams(TypedDict, total=False):
     """발신 전화 생성 요청 파라미터.
 
-    **3가지 모드:**
+    **2가지 모드:**
 
     - **VoiceML 모드**: ``url``\\을 지정하면 VoiceML로 통화를 제어합니다.
-    - **Agent 모드**: ``url``\\과 ``ai`` 모두 생략하면 Agent SDK로 통화가 연결됩니다.
-    - **AI Completion 모드**: ``ai``\\를 지정하면 AI가 직접 통화를 처리합니다.
+    - **Agent 모드**: ``url``\\을 생략하면 Agent SDK로 통화가 연결됩니다.
     """
 
     to: Required[Annotated[str, PropertyInfo(alias="To")]]
@@ -154,10 +25,7 @@ class CallCreateParams(TypedDict, total=False):
     """발신 번호. 계정에 등록된 번호여야 합니다."""
 
     url: Annotated[str, PropertyInfo(alias="Url")]
-    """통화 연결 시 VoiceML 명령을 반환할 URL. AI 모드와 동시 사용 불가."""
-
-    ai: Annotated[AIConfigParam, PropertyInfo(alias="AI")]
-    """AI Completion 모드 설정. 이 필드가 있으면 AI가 통화를 처리합니다."""
+    """통화 연결 시 VoiceML 명령을 반환할 URL."""
 
     status_callback: Annotated[str, PropertyInfo(alias="StatusCallback")]
     """통화 상태 변경 시 POST 요청을 받을 콜백 URL."""

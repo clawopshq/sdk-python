@@ -239,19 +239,6 @@ elif state.status == "not_requested":
 summary = client.calls.get_summary("CAabcdef1234567890")
 if summary.status == "completed":
     print(summary.result_json)  # {"coreSummary": ..., "decisions": [...], ...}
-
-# AI Completion 모드 — AI가 직접 통화를 처리
-ai_call = client.calls.create(
-    to="01012345678",
-    from_="07052358010",
-    ai={
-        "provider": "openai",
-        "model": "gpt-realtime",
-        "api_key": os.environ["OPENAI_API_KEY"],
-        "voice": "marin",
-        "messages": [{"role": "system", "content": "당신은 예약 확인 AI입니다."}],
-    },
-)
 ```
 
 ### 통화 녹음 (Recordings)
