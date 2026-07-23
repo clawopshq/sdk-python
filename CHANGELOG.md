@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.37.1 (2026-07-23)
+
+### Fixed
+- **발신 통화에서 `@agent.tool` 로 등록한 도구가 AI 에게 전달되지 않던 문제.** 발신은 originate 직후 prewarm 이 돌면서 LLM 에 tool 스키마를 확정 전송하는데(OpenAI `session.update` / Gemini Live connect config), 도구 주입은 상대가 받은 뒤인 `_start_call_session` 에서야 실행됐다. 즉 **유저 도구가 통째로 빠진 채 세션이 시작**되어, 아무리 유도해도 도구가 호출되지 않았다. 착신·`PipelineSession`·`LiveKitSession` 은 영향 없음. 이제 prewarm 전에 도구를 주입한다.
+- MCP 도구는 통화 시작 시점에야 registry 에 붙으므로 prewarm 스키마에 없었다. OpenAI Realtime 은 `attach()` 에서 도구가 바뀐 경우에만 `session.update` 로 재전송한다. Gemini Live 는 연결 후 도구 변경이 불가능하므로, MCP 서버가 설정돼 있으면 prewarm 을 건너뛰고 기존 `start()` 경로로 간다.
+- **prewarm 창(상대가 받기 전)에 내장 통화 제어 도구가 호출되면 크래시**했다. 이 구간의 통화 객체는 버퍼링 stub 이라 `hangup()` 이 없어 `AttributeError` 가 나고, tool 결과가 모델에 영영 돌아가지 않아 응답이 멈춘 채로 통화가 시작될 수 있었다. 이제 "통화가 아직 연결되지 않았습니다" 결과를 돌려줘 모델이 응답 후 다시 호출할 수 있다.
+
 ## 0.37.0 (2026-07-22)
 
 ### Fixed

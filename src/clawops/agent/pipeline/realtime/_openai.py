@@ -131,6 +131,10 @@ class OpenAIRealtime:
         # PREWARM-T first-audio 마커를 한 번만 emit 하기 위한 가드.
         # drain_into 가 prebuffer 를 flush 한 케이스 / 비어있던 케이스 모두 한 번씩.
         self._first_audio_logged: bool = False
+        # 마지막 session.update 로 LLM 에 알린 tool 이름들. attach() 가 이 값과
+        # 현재 registry 를 비교해 달라졌을 때만(=MCP 도구 등 뒤늦게 붙은 경우)
+        # 도구를 재전송한다.
+        self._sent_tool_names: list[str] | None = None
 
     def set_hold_audio(self, chunks: list[bytes]) -> None:
         """Tool 실행 중 재생할 hold audio 청크를 설정한다."""
@@ -191,8 +195,8 @@ class OpenAIRealtime:
         self._connection = await self._open_connection()
         log.info("OpenAI Realtime connected (prewarm)")
 
-        tool_schemas = self._tools.to_openai_tools()
-        tool_schemas.extend(get_builtin_tool_schemas(self._builtin_tools, fmt="realtime"))
+        tool_schemas = self._current_tool_schemas()
+        self._sent_tool_names = [str(t.get("name", "")) for t in tool_schemas]
 
         await self._connection.session.update(
             session={
@@ -224,12 +228,42 @@ class OpenAIRealtime:
 
         self._tasks.append(asyncio.create_task(self._receive_loop()))
 
+    def _current_tool_schemas(self) -> list[dict[str, Any]]:
+        """현재 registry + 내장 도구의 realtime 포맷 스키마."""
+        schemas = self._tools.to_openai_tools()
+        schemas.extend(get_builtin_tool_schemas(self._builtin_tools, fmt="realtime"))
+        return schemas
+
+    async def _resync_tools(self) -> None:
+        """prewarm 이후 도구가 바뀌었으면 session.update 로 재전송한다.
+
+        MCP 도구는 통화 시작 시점에 registry 에 붙으므로 prewarm 시점의 스키마에는
+        없다. 여기서 맞춰주지 않으면 발신 통화에서 MCP 도구를 영영 못 쓴다.
+        """
+        if self._connection is None:
+            return
+        tool_schemas = self._current_tool_schemas()
+        names = [str(t.get("name", "")) for t in tool_schemas]
+        if names == self._sent_tool_names:
+            return
+        try:
+            await self._connection.session.update(
+                session={"type": "realtime", "tools": tool_schemas}
+            )
+            self._sent_tool_names = names
+            log.info("Tool schema resynced after prewarm: %s", names)
+        except Exception as e:
+            # 도구 재동기화 실패가 통화를 끊게 두지 않는다.
+            log.warning("Tool resync failed: %s", e)
+
     async def attach(self, call: CallSession) -> None:
         """prewarmed 세션에 실제 CallSession 부착 + 버퍼 flush.
 
         prewarm() 이 선행되어 있어야 한다. start() 는 prewarm+attach wrapper.
         """
         from .._buffering_call import drain_into
+
+        await self._resync_tools()
 
         prev = self._call
         self._call = call

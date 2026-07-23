@@ -156,6 +156,13 @@ def get_builtin_tool_schemas(
 
 # ── 공통 실행 헬퍼 ──────────────────────────────────────────────────
 
+CALL_NOT_READY_RESULT = (
+    "통화가 아직 연결되지 않았습니다(발신 호출음 단계). "
+    "상대가 전화를 받은 뒤에 다시 시도하세요."
+)
+"""prewarm 창에서 통화 제어 도구가 호출됐을 때 모델에 돌려주는 결과."""
+
+
 async def execute_builtin_tool(
     func_name: str,
     args: dict[str, Any],
@@ -165,7 +172,17 @@ async def execute_builtin_tool(
 
     ``func_name`` 이 builtin tool이 아니면 ``None`` 을 반환한다.
     ``hang_up`` 의 경우 빈 문자열 ``""`` 을 반환한다 (호출자가 종료 처리).
+
+    prewarm 창(=상대가 받기 전)에는 ``call`` 이 실제 통화가 아니라 버퍼링 stub 이라
+    hangup/transfer/DTMF 를 수행할 대상이 없다. 이때는 예외를 던지는 대신 모델이
+    이해할 수 있는 결과를 돌려준다 — 안 그러면 tool 결과가 영영 안 돌아가 모델이
+    응답을 멈춘 채로 통화가 시작된다.
     """
+    from ._buffering_call import _BufferingCall
+
+    if isinstance(call, _BufferingCall):
+        return CALL_NOT_READY_RESULT
+
     if func_name == "hang_up":
         await call.hangup()
         return ""

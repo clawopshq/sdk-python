@@ -260,10 +260,7 @@ class ClawOpsAgent:
         # greeting 생성을 흡수해 answer→first-audio latency 를 줄인다. call.ringing
         # 이벤트는 트렁크가 SIP 18x 를 안 올리면 도착하지 않을 수 있어 신뢰하지 않는다.
         # ringing/outbound_ready 핸들러의 prewarm 시작은 이 시점을 놓쳤을 때의 fallback.
-        if self._prewarm_enabled and call_session.call_id not in self._prewarm_tasks:
-            self._prewarm_tasks[call_session.call_id] = asyncio.create_task(
-                self._prewarm_session(call_session.call_id)
-            )
+        self._start_prewarm(call_session.call_id)
 
         return call_session
 
@@ -324,6 +321,46 @@ class ClawOpsAgent:
             self._active_sessions.pop(call.call_id, None)
             self._call_sessions.pop(call.call_id, None)
 
+    def _inject_session_deps(
+        self,
+        session: Any,
+        tools: ToolRegistry,
+        *,
+        recorder: AudioRecorder | None = None,
+    ) -> None:
+        """세션에 콜별 의존성(도구·내장도구·hold audio·recorder)을 duck-typing 으로 주입한다.
+
+        prewarm 과 _start_call_session 양쪽에서 부른다. prewarm 은 세션이 LLM 에
+        보낼 tool 스키마를 그 시점에 확정하므로(OpenAI session.update / Gemini live
+        connect config), prewarm **전에** 최소 한 번은 도구가 들어가 있어야 한다.
+        """
+        if hasattr(session, "set_tool_registry"):
+            session.set_tool_registry(tools)
+        if recorder is not None and hasattr(session, "set_recorder"):
+            session.set_recorder(recorder)
+        if hasattr(session, "set_builtin_tools"):
+            session.set_builtin_tools(self._builtin_tools)
+        if self._hold_audio_chunks and hasattr(session, "set_hold_audio"):
+            session.set_hold_audio(self._hold_audio_chunks)
+
+    def _start_prewarm(self, call_id: str) -> None:
+        """prewarm task 를 시작한다. 같은 callId 로 여러 번 불러도 안전하다.
+
+        MCP 도구는 통화 시작 시점(_start_call_session)에야 등록되는데, 연결 후 도구
+        변경이 불가능한 세션(Gemini Live)은 prewarm 하면 MCP 도구를 영영 못 쓴다.
+        그런 조합에서는 prewarm 을 건너뛰고 기존 start() 경로로 간다.
+        """
+        if not self._prewarm_enabled or call_id in self._prewarm_tasks:
+            return
+        if self._mcp_servers and getattr(self._session, "tools_frozen_after_prewarm", False):
+            log.info(
+                "Skipping prewarm for %s — 세션이 연결 후 도구 변경을 지원하지 않아 "
+                "MCP 도구가 누락된다.",
+                call_id,
+            )
+            return
+        self._prewarm_tasks[call_id] = asyncio.create_task(self._prewarm_session(call_id))
+
     async def _start_call_session(self, call: CallSession, media_url: str) -> None:
         with call_span(
             call.call_id,
@@ -355,14 +392,7 @@ class ClawOpsAgent:
                 call_tools.register_mcp_tools(mcp_clients)
 
             session = self._session
-            if hasattr(session, "set_tool_registry"):
-                session.set_tool_registry(call_tools)
-            if recorder and hasattr(session, "set_recorder"):
-                session.set_recorder(recorder)
-            if hasattr(session, "set_builtin_tools"):
-                session.set_builtin_tools(self._builtin_tools)
-            if self._hold_audio_chunks and hasattr(session, "set_hold_audio"):
-                session.set_hold_audio(self._hold_audio_chunks)
+            self._inject_session_deps(session, call_tools, recorder=recorder)
 
             latest_media_ts = 0
 
@@ -518,10 +548,7 @@ class ClawOpsAgent:
         # ringing 이벤트가 오지 않은 경우의 fallback 으로만 시작한다.
         # _start_call_session 이 prewarm task 를 await 후 attach() 로 부착한다.
         # prewarm_enabled=False 면 기존 start() 경로로 동작.
-        if self._prewarm_enabled and call_id not in self._prewarm_tasks:
-            self._prewarm_tasks[call_id] = asyncio.create_task(
-                self._prewarm_session(call_id)
-            )
+        self._start_prewarm(call_id)
 
         asyncio.create_task(self._safe_start_call_session(call, media_url))
 
@@ -534,6 +561,10 @@ class ClawOpsAgent:
         t0 = time.monotonic()
         log.info(f"[PREWARM-T] start call_id={call_id} t={t0:.3f}")
         try:
+            # prewarm 은 tool 스키마를 LLM 에 확정 전송한다. 여기서 주입하지 않으면
+            # @agent.tool 로 등록한 도구가 통째로 빠진 채 세션이 시작된다 —
+            # _start_call_session 의 주입은 answer 이후라 이미 늦다.
+            self._inject_session_deps(self._session, self._tool_registry.fork())
             await asyncio.wait_for(self._session.prewarm(), timeout=10.0)
             log.info(
                 f"[PREWARM-T] done call_id={call_id} elapsed_ms={(time.monotonic() - t0) * 1000:.0f}"
