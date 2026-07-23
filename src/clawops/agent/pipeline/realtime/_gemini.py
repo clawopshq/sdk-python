@@ -128,6 +128,13 @@ class GeminiRealtime:
     Session Protocol을 구현한다.
     """
 
+    tools_frozen_after_prewarm: bool = True
+    """Gemini Live 는 connect 시점의 config 로 도구가 고정되어 세션 도중 변경할 수 없다.
+
+    통화 시작 시점에야 붙는 MCP 도구는 prewarm 된 세션에 넣을 방법이 없으므로,
+    `ClawOpsAgent` 가 MCP 서버 설정과 이 플래그를 보고 prewarm 을 건너뛴다.
+    """
+
     def __init__(
         self,
         *,
