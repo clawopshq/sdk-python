@@ -19,7 +19,6 @@ class Calls(SyncAPIResource):
         to: str,
         from_: str,
         url: str | None = None,
-        ai: dict | None = None,
         status_callback: str | None = None,
         status_callback_event: str | None = None,
         timeout: int | None = None,
@@ -33,17 +32,14 @@ class Calls(SyncAPIResource):
         PSTN 번호로 아웃바운드 전화를 발신합니다.
         From 번호는 계정에 등록된 번호여야 합니다.
 
-        **3가지 모드:**
+        **2가지 모드:**
         - VoiceML 모드: ``url``을 지정하면 VoiceML로 통화를 제어합니다.
-        - Agent 모드: ``url``과 ``ai`` 모두 생략하면 Agent SDK로 통화가 연결됩니다.
-        - AI Completion 모드: ``ai``를 지정하면 AI가 직접 통화를 처리합니다.
+        - Agent 모드: ``url``을 생략하면 Agent SDK로 통화가 연결됩니다.
 
         Args:
             to: 수신 전화번호.
             from_: 발신 번호. 계정에 등록된 번호여야 합니다.
-            url: VoiceML 명령을 반환할 URL. AI 모드와 동시 사용 불가.
-            ai: AI Completion 모드 설정. provider, model, api_key가 필수.
-                예: ``{"provider": "openai", "model": "gpt-realtime", "api_key": "sk-..."}``
+            url: VoiceML 명령을 반환할 URL.
             status_callback: 통화 상태 변경 시 POST 요청을 받을 콜백 URL.
             status_callback_event: 수신할 상태 이벤트 목록 (공백 구분).
             timeout: 발신 타임아웃 (초). 기본값: 60.
@@ -63,28 +59,11 @@ class Calls(SyncAPIResource):
             InternalServerError: 발신 실패.
             ServiceUnavailableError: ARI 서비스가 준비되지 않음.
         """
-        ai_body = None
-        if ai:
-            ai_body = strip_not_given(
-                {
-                    "Provider": ai.get("provider"),
-                    "Model": ai.get("model"),
-                    "ApiKey": ai.get("api_key"),
-                    "Voice": ai.get("voice"),
-                    "Language": ai.get("language"),
-                    "Messages": ai.get("messages"),
-                    "Tools": ai.get("tools"),
-                    "Greeting": ai.get("greeting"),
-                    "TurnDetection": ai.get("turn_detection"),
-                    "RealtimeInputConfig": ai.get("realtime_input_config"),
-                }
-            )
         body = strip_not_given(
             {
                 "To": to,
                 "From": from_,
                 "Url": url,
-                "AI": ai_body,
                 "StatusCallback": status_callback,
                 "StatusCallbackEvent": status_callback_event,
                 "Timeout": timeout,
@@ -328,7 +307,6 @@ class AsyncCalls(AsyncAPIResource):
         to: str,
         from_: str,
         url: str | None = None,
-        ai: dict | None = None,
         status_callback: str | None = None,
         status_callback_event: str | None = None,
         timeout: int | None = None,
@@ -338,28 +316,11 @@ class AsyncCalls(AsyncAPIResource):
         timeout_: float | None = None,
     ) -> Call:
         """발신 전화를 비동기로 생성합니다. 자세한 내용은 Calls.create를 참고하세요."""
-        ai_body = None
-        if ai:
-            ai_body = strip_not_given(
-                {
-                    "Provider": ai.get("provider"),
-                    "Model": ai.get("model"),
-                    "ApiKey": ai.get("api_key"),
-                    "Voice": ai.get("voice"),
-                    "Language": ai.get("language"),
-                    "Messages": ai.get("messages"),
-                    "Tools": ai.get("tools"),
-                    "Greeting": ai.get("greeting"),
-                    "TurnDetection": ai.get("turn_detection"),
-                    "RealtimeInputConfig": ai.get("realtime_input_config"),
-                }
-            )
         body = strip_not_given(
             {
                 "To": to,
                 "From": from_,
                 "Url": url,
-                "AI": ai_body,
                 "StatusCallback": status_callback,
                 "StatusCallbackEvent": status_callback_event,
                 "Timeout": timeout,
