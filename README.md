@@ -223,6 +223,17 @@ for call in client.calls.list().auto_paging_iter():
 # 특정 통화 조회
 call = client.calls.get("CAabcdef1234567890")
 
+# 연결 실패 사유 확인 — status="failed" 는 결번·망 오류·시스템 오류를 모두 포함하는
+# 대분류라, 다시 걸어도 소용없는 번호를 가려내려면 hangup_cause 를 봅니다.
+DO_NOT_RETRY = {"invalid_number", "number_changed", "incompatible_destination"}
+if call.status != "completed":
+    if call.hangup_cause in DO_NOT_RETRY:
+        print(f"결번 — 목록에서 제외: {call.to}")        # hangup_cause_q850=1, sip_response_code=404
+    elif call.hangup_source in ("app", "system"):
+        print("ClawOps 측 오류 — 재시도")
+    else:
+        print(f"일시적 사유({call.hangup_cause}) — 나중에 재시도")
+
 # 통화 종료
 call = client.calls.update("CAabcdef1234567890", status="completed")
 

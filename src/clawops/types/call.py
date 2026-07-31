@@ -30,6 +30,25 @@ class Call(BaseModel):
         answered_by: AMD(machine_detection) 결과. machine_detection 을 켠 발신
             통화에만 값이 있으며 human(사람) / machine(자동응답기·음성사서함) /
             unknown(판정 불가). 미사용 시 None.
+        hangup_cause: 통화 종료 사유. status 가 왜 그렇게 끝났는지를 구분한다 —
+            특히 failed 는 결번·망 오류·시스템 오류를 모두 포함하는 대분류라,
+            발신 리스트를 정제하려면 status 가 아니라 이 값을 봐야 한다.
+            재시도해도 소용없음: invalid_number(결번) / number_changed /
+            incompatible_destination. 재시도 가치 있음: no_answer / user_busy /
+            temporary_failure / switching_congestion / no_circuit_available /
+            network_out_of_order / destination_out_of_order /
+            recovery_on_timer_expire / resource_unavailable. 그 외:
+            normal_clearing(정상 종료) / caller_canceled / call_rejected /
+            protocol_error / unspecified / app_error·call_stuck(ClawOps 측 오류
+            — 재시도 권장) / unknown. 종료 전이거나 사유 미상이면 None.
+        hangup_cause_q850: 통신망 Q.850 cause code. 1·5·28=결번, 16=정상해제,
+            17=통화중, 18/19/20=무응답, 21=거절, 38=망장애. 사유 미상이면 None.
+        sip_response_code: 종료를 유발한 SIP 응답코드. 404=없는 번호, 486=통화중,
+            500=망 오류 등. 응답코드 없이 끝났으면 None. 국내 통신망은 실제 사유를
+            500 으로 감싸 보내기도 하므로 hangup_cause 가 더 정확하다.
+        hangup_source: 종료 책임 주체. carrier(통신망) / callee(수신자) /
+            caller(발신자) / app·system(ClawOps 측 오류 — 수신자 번호를 정제
+            대상에 넣지 말고 재시도할 것).
     """
 
     call_id: str
@@ -50,6 +69,12 @@ class Call(BaseModel):
     duration: Optional[int] = None
     recording_url: Optional[str] = None
     answered_by: Optional[Literal["human", "machine", "unknown"]] = None
+    # 종료 사유는 Literal 로 좁히지 않는다 — 통신망이 새 cause 를 보내면 서버가 enum 을
+    # 넓히는데, 클라이언트가 그때마다 릴리즈되어야 파싱되는 구조는 안 된다.
+    hangup_cause: Optional[str] = None
+    hangup_cause_q850: Optional[int] = None
+    sip_response_code: Optional[int] = None
+    hangup_source: Optional[Literal["carrier", "callee", "caller", "app", "system"]] = None
     account_id: str
     date_created: datetime
     date_updated: Optional[datetime] = None

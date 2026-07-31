@@ -29,6 +29,66 @@ def test_call_from_api_response():
     assert call.date_updated is None
 
 
+def test_call_hangup_cause_from_api_response():
+    """실패 통화의 종료 사유 — 결번을 재시도 대상과 구분하는 값."""
+    data = {
+        "callId": "CA14ad61795d28ba036a383f66565376b4",
+        "status": "failed",
+        "to": "07080588491",
+        "from": "07052361088",
+        "direction": "outbound",
+        "duration": 0,
+        "accountId": "AC1a2b3c4d",
+        "dateCreated": "2026-07-30T17:18:15Z",
+        "dateUpdated": "2026-07-30T17:18:15Z",
+        "hangupCause": "invalid_number",
+        "hangupCauseQ850": 1,
+        "sipResponseCode": 404,
+        "hangupSource": "carrier",
+    }
+    call = Call.model_validate(data)
+    assert call.hangup_cause == "invalid_number"
+    assert call.hangup_cause_q850 == 1
+    assert call.sip_response_code == 404
+    assert call.hangup_source == "carrier"
+
+
+def test_call_hangup_cause_absent_is_none():
+    """종료 전이거나 사유 미상인 통화는 네 필드 모두 None (하위호환)."""
+    data = {
+        "callId": "CA123",
+        "status": "in-progress",
+        "to": "01012345678",
+        "from": "07052358010",
+        "direction": "outbound",
+        "accountId": "AC1a2b3c4d",
+        "dateCreated": "2026-07-30T17:18:15Z",
+    }
+    call = Call.model_validate(data)
+    assert call.hangup_cause is None
+    assert call.hangup_cause_q850 is None
+    assert call.sip_response_code is None
+    assert call.hangup_source is None
+
+
+def test_call_unknown_hangup_cause_is_accepted():
+    """서버가 새 cause 를 보내도 파싱은 깨지지 않는다 (Literal 로 좁히지 않은 이유)."""
+    data = {
+        "callId": "CA123",
+        "status": "failed",
+        "to": "01012345678",
+        "from": "07052358010",
+        "direction": "outbound",
+        "accountId": "AC1a2b3c4d",
+        "dateCreated": "2026-07-30T17:18:15Z",
+        "hangupCause": "some_future_cause",
+        "hangupCauseQ850": 255,
+    }
+    call = Call.model_validate(data)
+    assert call.hangup_cause == "some_future_cause"
+    assert call.hangup_cause_q850 == 255
+
+
 def test_call_control_response():
     data = {"callId": "CA123", "status": "completed"}
     resp = CallControlResponse.model_validate(data)
