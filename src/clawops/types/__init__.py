@@ -1,3 +1,9 @@
+from .blocked_recipient import (
+    BlockedChannel,
+    BlockedRecipient,
+    BlockedRecipientSource,
+    BlockedRecipientStatus,
+)
 from .call import Call, CallControlResponse
 from .call_params import CallCreateParams, CallListParams, CallUpdateParams
 from .message import Message
@@ -12,6 +18,10 @@ from .transcript import TranscriptRequestAccepted, TranscriptSegment, Transcript
 from .webhook_log import WebhookLog
 
 __all__ = [
+    "BlockedChannel",
+    "BlockedRecipient",
+    "BlockedRecipientSource",
+    "BlockedRecipientStatus",
     "Call",
     "CallControlResponse",
     "CallCreateParams",

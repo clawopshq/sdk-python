@@ -206,9 +206,31 @@ class SyncAPIClient:
         assert result is not None
         return result
 
+    def _patch(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+               extra_headers: dict[str, str] | None = None, extra_query: dict[str, object] | None = None,
+               timeout: float | httpx.Timeout | None = None) -> _T:
+        result = self._request("PATCH", path, body=body, cast_to=cast_to,
+                               extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
+        assert result is not None
+        return result
+
     def _delete(self, path: str, *, extra_headers: dict[str, str] | None = None,
                 timeout: float | httpx.Timeout | None = None) -> None:
         self._request("DELETE", path, cast_to=None, extra_headers=extra_headers, timeout=timeout)
+
+    def _delete_with_response(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+                              extra_headers: dict[str, str] | None = None,
+                              extra_query: dict[str, object] | None = None,
+                              timeout: float | httpx.Timeout | None = None) -> _T:
+        """본문을 돌려주는 DELETE.
+
+        ``_delete`` 는 응답을 버리는데, soft delete 처럼 삭제 결과 리소스를 그대로
+        반환하는 endpoint 가 있어서 따로 둔다.
+        """
+        result = self._request("DELETE", path, body=body, cast_to=cast_to,
+                               extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
+        assert result is not None
+        return result
 
     def _get_raw(
         self,
@@ -390,9 +412,27 @@ class AsyncAPIClient:
         assert result is not None
         return result
 
+    async def _patch(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+                     extra_headers: dict[str, str] | None = None, extra_query: dict[str, object] | None = None,
+                     timeout: float | httpx.Timeout | None = None) -> _T:
+        result = await self._request("PATCH", path, body=body, cast_to=cast_to,
+                                     extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
+        assert result is not None
+        return result
+
     async def _delete(self, path: str, *, extra_headers: dict[str, str] | None = None,
                       timeout: float | httpx.Timeout | None = None) -> None:
         await self._request("DELETE", path, cast_to=None, extra_headers=extra_headers, timeout=timeout)
+
+    async def _delete_with_response(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+                                    extra_headers: dict[str, str] | None = None,
+                                    extra_query: dict[str, object] | None = None,
+                                    timeout: float | httpx.Timeout | None = None) -> _T:
+        """본문을 돌려주는 DELETE (sync 쪽 ``_delete_with_response`` 와 동일)."""
+        result = await self._request("DELETE", path, body=body, cast_to=cast_to,
+                                     extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
+        assert result is not None
+        return result
 
     async def _get_raw(
         self,
