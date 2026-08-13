@@ -278,34 +278,53 @@ client.recordings.delete("CAabcdef1234567890")
 ### 전화번호 (Numbers)
 
 ```python
-# 번호 구매
-number = client.numbers.create(source="pool")
-print(number.phone_number)
+# 번호 발급 — 풀에서 자동 배정되며 어떤 번호가 나올지는 지정할 수 없다
+number = client.numbers.create()
+print(number.number, number.routing_type)  # 07012340001 webhook
 
-# 번호 목록 조회
+# 번호 목록 조회 (페이지네이션 없음 — 보유한 번호가 전부 반환된다)
 numbers = client.numbers.list()
 
-# 웹훅 URL 변경
-number = client.numbers.update("07012340001", webhook_url="https://my-app.com/webhook")
+# 발급 직후에는 webhook_url 이 비어 있어 걸려온 전화가 거절된다. 착신 라우팅을 지정한다.
 
-# 인바운드 소프트폰 착신으로 라우팅 변경 (sip_trunk 부가서비스 + 등록 단말 필요)
-# 1) 등록된 SIP 단말(credential) 목록에서 id 조회
-creds = client.sip_credentials.list(status="active")
-cred_id = creds[0].id
-# 2) 그 id 로 라우팅 설정
-number = client.numbers.update(
+# 매니지드 에이전트가 받도록
+client.numbers.update("07012340001", routing_type="agent", agent_id="AG7c2f9b1e4a6d")
+
+# 콜 플로우(ARS)가 받도록
+client.numbers.update("07012340001", routing_type="callflow", call_flow_id="CF41b8e07d9c25")
+
+# 내 서버의 VoiceML 이 받도록
+client.numbers.update(
     "07012340001",
-    routing_type="softphone",
-    sip_credential_id=cred_id,
+    routing_type="webhook",
+    webhook_url="https://my-app.com/voice",
 )
 
-# (sip 라우팅의 경우) SIP 엔드포인트 id 조회
-endpoints = client.sip_endpoints.list(status="active")
-number = client.numbers.update("07012340001", routing_type="sip", sip_endpoint_id=endpoints[0].id)
+# 보유한 다른 번호로 착신전환 (같은 계정의 번호만 가능)
+client.numbers.update("07012340001", routing_type="forward", forward_to="07012340002")
 
-# 번호 해제
+# 소프트폰 단말 착신 (sip_trunk 부가서비스 + 등록 단말 필요)
+creds = client.sip_credentials.list(status="active")
+client.numbers.update("07012340001", routing_type="softphone", sip_credential_id=creds[0].id)
+
+# 외부 PBX 로 (sip_trunk 부가서비스 + 활성 라우트 1개 이상 필요)
+endpoints = client.sip_endpoints.list(status="active")
+client.numbers.update("07012340001", routing_type="sip", sip_endpoint_id=endpoints[0].id)
+
+# 수신 통화 상태 통지
+client.numbers.update(
+    "07012340001",
+    status_callback="https://my-app.com/call-status",
+    status_callback_events="initiated ringing answered completed",
+)
+
+# 번호 반납 — 되돌릴 수 없고 같은 번호를 다시 받는다는 보장이 없다
 client.numbers.delete("07012340001")
 ```
+
+라우팅을 바꾸면 다른 라우팅 필드는 서버에서 자동으로 비워집니다. `agent` 에서 `webhook` 으로
+되돌리면 `agent_id` 가 `None` 이 되므로, 다시 `agent` 로 돌아갈 때 `agent_id` 를 새로 지정해야
+합니다.
 
 ### 메시지 (Messages)
 

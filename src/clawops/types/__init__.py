@@ -8,7 +8,7 @@ from .call import Call, CallControlResponse
 from .call_params import CallCreateParams, CallListParams, CallUpdateParams
 from .message import Message
 from .message_params import MessageCreateParams, MessageListParams
-from .number import NumberListItem, NumberUpdateResponse, PhoneNumber
+from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
 from .number_params import NumberCreateParams, NumberUpdateParams
 from .recording import RecordingDownload
 from .shared import PaginationMeta
@@ -37,6 +37,7 @@ __all__ = [
     "PaginationMeta",
     "PhoneNumber",
     "RecordingDownload",
+    "RoutingType",
     "SipCredential",
     "SipEndpoint",
     "SummaryStatus",
