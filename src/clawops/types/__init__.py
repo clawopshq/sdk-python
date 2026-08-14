@@ -5,7 +5,7 @@ from .blocked_recipient import (
     BlockedRecipientStatus,
 )
 from .call import Call, CallControlResponse
-from .call_params import CallCreateParams, CallListParams, CallUpdateParams
+from .call_params import CallContextParam, CallCreateParams, CallListParams, CallUpdateParams
 from .message import Message
 from .message_params import MessageCreateParams, MessageListParams
 from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
@@ -23,6 +23,7 @@ __all__ = [
     "BlockedRecipientSource",
     "BlockedRecipientStatus",
     "Call",
+    "CallContextParam",
     "CallControlResponse",
     "CallCreateParams",
     "CallListParams",
