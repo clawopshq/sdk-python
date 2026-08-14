@@ -46,7 +46,8 @@ class ClawOpsAgent:
         account_id: str | None = None,
         base_url: str | None = None,
         from_: str,
-        session: Session,
+        session: Session | None = None,
+        session_factory: Callable[[], Session] | None = None,
         mcp_servers: list[Any] | None = None,
         recording: bool = False,
         recording_path: str = "./recordings",
@@ -72,12 +73,20 @@ class ClawOpsAgent:
         if base_url is None:
             base_url = os.environ.get("CLAWOPS_BASE_URL", "https://api.claw-ops.com")
 
+        if (session is None) == (session_factory is None):
+            raise AgentError(
+                "session 또는 session_factory 중 하나만 지정하세요. "
+                "동시 통화를 한 프로세스로 처리하려면 session_factory 를 쓰세요 — "
+                "session 은 통화 사이에 같은 객체를 공유하므로 동시 통화 1건까지만 안전합니다."
+            )
+
         self._api_key = api_key
         self._account_id = account_id
         self._base_url = base_url
         self._from_number = from_
 
         self._session = session
+        self._session_factory = session_factory
         self._mcp_servers = mcp_servers or []
         self._recording = recording
         self._recording_path = recording_path
@@ -96,7 +105,10 @@ class ClawOpsAgent:
 
         self._builtin_tools = resolve_builtin_tools(builtin_tools)
         self._passive_dtmf_debounce_ms = passive_dtmf_debounce_ms
-        self._call_sessions: dict[str, Any] = {}  # call_id → pipeline Session (feed_dtmf용)
+        # call_id → 그 통화가 쓰는 Session. 팩토리 모드에서는 이 표가 SoT 다 —
+        # _session_for() 가 여기에 만들어 넣고, 통화 teardown 이 pop 한다.
+        # 공유 모드에서는 모든 항목이 같은 self._session 을 가리킨다.
+        self._call_sessions: dict[str, Session] = {}
 
         self._tool_registry = ToolRegistry()
         self._event_handlers: dict[str, list[Callable[..., Awaitable[None]]]] = {}
@@ -135,7 +147,9 @@ class ClawOpsAgent:
         # 세션 프로세스 수명 셋업 (있으면). control WS task + 모든 통화 task 의 공통
         # 조상인 이 시점(root task)에서 돌아야 하는 준비 작업 — 예: LiveKitSession 이
         # HTTP 플러그인용 http_context 를 여기서 연다.
-        if hasattr(self._session, "session_setup"):
+        # 팩토리 모드에는 프로세스 세션이 없다 — 훅은 통화별 세션에 대해 _open_session /
+        # _close_session 이 돌린다.
+        if self._session is not None and hasattr(self._session, "session_setup"):
             await self._session.session_setup()
         await self._ensure_control_ws()
         log.info(f"ClawOpsAgent connected on {self._from_number}")
@@ -166,11 +180,73 @@ class ClawOpsAgent:
             self._control_ws_task.cancel()
             self._control_ws_task = None
         self._active_sessions.clear()
+        # 팩토리 모드에서 아직 안 치워진 통화 세션이 있으면 각자의 teardown 을 돌린다.
+        for call_id in list(self._call_sessions):
+            await self._close_session(call_id)
         self._call_sessions.clear()
         # session_setup 의 짝 — 같은 root task 에서 정리한다 (예: http_context 닫기).
-        if hasattr(self._session, "session_teardown"):
+        if self._session is not None and hasattr(self._session, "session_teardown"):
             await self._session.session_teardown()
         log.info("ClawOpsAgent disconnected")
+
+    # ── 통화별 Session 수명 ────────────────────────────────────────
+
+    async def _open_session(self, call_id: str) -> Session:
+        """이 통화가 쓸 Session 을 확정해 등록한다. 통화가 잡히는 즉시 호출한다.
+
+        공유 모드(`session=`)는 생성자가 받은 객체를 그대로 쓴다 — 모든 통화가 같은
+        인스턴스를 가리키므로 동시 통화 1건까지만 안전하다.
+        팩토리 모드(`session_factory=`)는 통화마다 새로 만든다. 대화 이력·오디오 큐·
+        전송 대상이 통화 안에 갇히므로 동시 통화가 서로를 덮어쓰지 않는다.
+        """
+        shared = self._session
+        if shared is not None:  # 공유 모드 — 생성자가 factory 와 배타임을 보장한다
+            if self._call_sessions and call_id not in self._call_sessions:
+                log.error(
+                    "동시 통화 %d건이 같은 Session 객체를 공유한다 (call_id=%s). 뒤에 시작한 "
+                    "통화가 앞선 통화의 대화 이력과 오디오 경로를 덮어쓴다 — "
+                    "ClawOpsAgent(session_factory=...) 로 바꾸면 통화별로 격리된다.",
+                    len(self._call_sessions) + 1,
+                    call_id,
+                )
+            self._call_sessions[call_id] = shared
+            return shared
+
+        assert self._session_factory is not None
+        session = self._call_sessions.get(call_id)
+        if session is None:
+            session = self._session_factory()
+            self._call_sessions[call_id] = session
+            # 공유 모드에서 connect() 가 돌리는 프로세스 훅의 통화판. 이 통화 task 에서
+            # 열었으므로 하위 STT/TTS task 가 contextvar 를 그대로 상속받는다.
+            if hasattr(session, "session_setup"):
+                await session.session_setup()
+        return session
+
+    async def _close_session(self, call_id: str) -> None:
+        """통화가 끝났을 때 그 통화의 Session 을 등록 해제하고 훅을 돌린다."""
+        session = self._call_sessions.pop(call_id, None)
+        if session is None or self._session_factory is None:
+            return
+        if hasattr(session, "session_teardown"):
+            try:
+                await session.session_teardown()
+            except Exception as e:
+                log.warning(f"session_teardown failed for {call_id}: {e}")
+
+    def _session_for(self, call_id: str) -> Session:
+        """이 통화의 Session. self._session 을 직접 읽지 않는 유일한 통로다.
+
+        등록 전에 불릴 수 있는 경로(테스트·전송 직전 실패 등)를 위해 공유 모드는
+        생성자가 받은 객체로 폴백한다. 팩토리 모드에는 폴백이 없다 — 여기서 새로
+        만들면 통화가 끝난 뒤의 정리 코드가 세션을 되살리게 된다.
+        """
+        session = self._call_sessions.get(call_id)
+        if session is not None:
+            return session
+        if self._session is not None:
+            return self._session
+        raise AgentError(f"통화 {call_id} 의 Session 이 등록되지 않았다")
 
     async def _ensure_control_ws(self) -> None:
         """Control WS가 없으면 연결한다."""
@@ -251,6 +327,9 @@ class ClawOpsAgent:
                 call_session.on(event, handler)
 
         self._active_sessions[call_session.call_id] = call_session
+        # prewarm 보다 먼저 이 통화의 Session 을 확정한다 — _start_prewarm 이
+        # tools_frozen_after_prewarm 을 그 인스턴스에서 읽는다.
+        await self._open_session(call_session.call_id)
         log.info(f"Outbound call initiated: {self._from_number} -> {to} ({call_session.call_id})")
 
         # originate 직후 prewarm 을 시작한다 — ring 구간(answer 이전)에 LLM 연결 +
@@ -281,6 +360,7 @@ class ClawOpsAgent:
                 call.on(event, handler)
 
         self._active_sessions[call_id] = call
+        await self._open_session(call_id)
 
         if self._control_ws:
             await self._control_ws.send({"event": "call.accept", "callId": call_id})
@@ -316,7 +396,7 @@ class ClawOpsAgent:
                 except Exception:
                     pass
             self._active_sessions.pop(call.call_id, None)
-            self._call_sessions.pop(call.call_id, None)
+            await self._close_session(call.call_id)
 
     def _inject_session_deps(
         self,
@@ -349,7 +429,9 @@ class ClawOpsAgent:
         """
         if not self._prewarm_enabled or call_id in self._prewarm_tasks:
             return
-        if self._mcp_servers and getattr(self._session, "tools_frozen_after_prewarm", False):
+        if self._mcp_servers and getattr(
+            self._session_for(call_id), "tools_frozen_after_prewarm", False
+        ):
             log.info(
                 "Skipping prewarm for %s — 세션이 연결 후 도구 변경을 지원하지 않아 "
                 "MCP 도구가 누락된다.",
@@ -388,7 +470,7 @@ class ClawOpsAgent:
                         mcp_clients.append(client)
                 call_tools.register_mcp_tools(mcp_clients)
 
-            session = self._session
+            session = await self._open_session(call.call_id)
             self._inject_session_deps(session, call_tools, recorder=recorder)
 
             latest_media_ts = 0
@@ -427,8 +509,6 @@ class ClawOpsAgent:
                 media_ws=media_ws,
                 transfer=lambda params: self._control_ws.request_transfer(call.call_id, params),
             )
-
-            self._call_sessions[call.call_id] = session
 
             await call._emit("call_start")
 
@@ -505,7 +585,7 @@ class ClawOpsAgent:
                 await call._emit("call_end")
                 call._mark_ended()
                 self._active_sessions.pop(call.call_id, None)
-                self._call_sessions.pop(call.call_id, None)
+                await self._close_session(call.call_id)
                 self._prewarm_attached.discard(call.call_id)
 
     async def _on_media_start(self, call: CallSession, info: dict[str, Any]) -> None:
@@ -561,8 +641,9 @@ class ClawOpsAgent:
             # prewarm 은 tool 스키마를 LLM 에 확정 전송한다. 여기서 주입하지 않으면
             # @agent.tool 로 등록한 도구가 통째로 빠진 채 세션이 시작된다 —
             # _start_call_session 의 주입은 answer 이후라 이미 늦다.
-            self._inject_session_deps(self._session, self._tool_registry.fork())
-            await asyncio.wait_for(self._session.prewarm(), timeout=10.0)
+            session = await self._open_session(call_id)
+            self._inject_session_deps(session, self._tool_registry.fork())
+            await asyncio.wait_for(session.prewarm(), timeout=10.0)
             log.info(
                 f"[PREWARM-T] done call_id={call_id} elapsed_ms={(time.monotonic() - t0) * 1000:.0f}"
             )
@@ -602,8 +683,15 @@ class ClawOpsAgent:
             prewarm_task.cancel()
         await asyncio.gather(prewarm_task, return_exceptions=True)
         # prewarm 이 이미 연결을 열었으면 task cancel 만으로는 닫히지 않는다 — stop() 필요.
+        # 반드시 **이 통화의** 세션이어야 한다. 예전에는 self._session 을 세워서, 실패한
+        # 발신 하나를 정리하는 것이 그때 통화 중이던 다른 통화의 세션을 내렸다.
+        # 등록이 이미 치워졌으면 닫을 것이 없다 — 여기서 self._session 으로 폴백하면
+        # 그 교차 종료가 그대로 되살아난다.
+        session = self._call_sessions.get(call_id)
+        if session is None:
+            return
         try:
-            await self._session.stop()
+            await session.stop()
         except Exception as e:
             log.warning(f"prewarm cleanup stop() failed for {call_id}: {e}")
 
@@ -619,6 +707,7 @@ class ClawOpsAgent:
             call._mark_ended(reason)
             self._active_sessions.pop(call_id, None)
         await self._cleanup_prewarm(call_id)
+        await self._close_session(call_id)
 
     async def _handle_ended(self, data: dict[str, Any]) -> None:
         call_id = data.get("callId", "")
@@ -638,8 +727,10 @@ class ClawOpsAgent:
                 await call._emit("call_failed", status)
             call._mark_ended(status)
         self._active_sessions.pop(call_id, None)
-        self._call_sessions.pop(call_id, None)
+        # 순서가 중요하다 — _cleanup_prewarm 이 이 통화의 세션을 stop() 해야 하므로
+        # 등록을 지우기 전에 돌린다.
         await self._cleanup_prewarm(call_id)
+        await self._close_session(call_id)
 
     def _on_dtmf_event(self, call: CallSession, digit: str) -> None:
         """DTMF 수신 시 호출. collector 또는 패시브 모드로 라우팅."""

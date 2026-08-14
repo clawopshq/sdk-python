@@ -79,6 +79,33 @@ session=GeminiRealtime(system_prompt="...")
 session=PipelineSession(stt=..., llm=..., tts=...)
 ```
 
+## 동시 통화와 세션 격리
+
+세션 객체는 **한 통화분의 상태**를 들고 있습니다 — 대화 이력, 오디오 큐, 지금 말을
+보낼 통화, 돌고 있는 task. 그래서 통화 여러 건이 한 객체를 같이 쓰면 나중에 시작한
+통화가 앞선 통화의 상태를 덮어쓰고, 앞선 통화가 끝날 때의 정리가 뒤 통화를 내립니다.
+
+`session_factory` 는 그 객체를 **통화마다** 만듭니다:
+
+```python
+agent = ClawOpsAgent(
+    from_="07012341234",
+    session_factory=lambda: OpenAIRealtime(system_prompt="..."),
+)
+```
+
+| | `session=` | `session_factory=` |
+|---|---|---|
+| 세션 인스턴스 | 프로세스에 하나 | 통화마다 하나 |
+| 안전한 동시 통화 | 1건 | 요금제 한도까지 |
+| `session_setup`/`teardown` | `connect()`/`disconnect()` | 통화 시작/종료 |
+
+`session=` 은 하위호환을 위해 남아 있습니다. 두 번째 동시 통화가 시작되면 원인을
+지목하는 에러 로그가 남습니다.
+
+동시 통화 한도 자체는 계정 요금제가 정합니다. SDK 격리와는 별개라, 번호를 여러 개
+운영하더라도 번호별로 프로세스를 나눌 필요는 없습니다.
+
 ## 오디오 코덱 체인
 
 ```

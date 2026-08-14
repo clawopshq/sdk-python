@@ -47,11 +47,14 @@ class LiveKitSession:
             )
             return session, MyAgent()
 
-        agent = ClawOpsAgent(from_="07012341234", session=LiveKitSession(create))
+        agent = ClawOpsAgent(
+            from_="07012341234",
+            session_factory=lambda: LiveKitSession(create),
+        )
 
-    ⚠️ v0 은 동시통화 1건이다 (`ClawOpsAgent._start_call_session` 이 세션 인스턴스를
-    통화 간 공유한다). `create` 를 팩토리로 받아두었으므로, `ClawOpsAgent` 가 팩토리를
-    지원하게 되면 유저 코드는 그대로 두고 통화당 격리로 넘어갈 수 있다.
+    동시통화를 받으려면 위처럼 `session_factory=` 로 넘긴다 — 통화마다 이 클래스가 새로
+    만들어져 `_session`/`_agent`/`_target` 이 통화 안에 갇힌다. `session=` 으로 인스턴스를
+    직접 넘기면 통화 간에 그 객체를 공유하므로 동시통화 1건까지다.
     """
 
     def __init__(self, create: CreateFn) -> None:

@@ -95,7 +95,11 @@ def test_agent_missing_api_key():
 
 
 def test_agent_missing_session():
-    with pytest.raises(TypeError, match="session"):
+    # session / session_factory 둘 다 없으면 AgentError. 예전에는 session 이 필수 kwarg 라
+    # TypeError 였다 — 지금은 둘 중 하나를 고르는 문제라 SDK 예외로 안내한다.
+    from clawops._exceptions import AgentError
+
+    with pytest.raises(AgentError, match="session_factory"):
         ClawOpsAgent(
             api_key="sk_test",
             account_id="AC_test",
@@ -371,6 +375,8 @@ async def test_failed_before_attach_stops_prewarmed_session():
     async def _done():
         return None
 
+    # 통화가 잡히면 세션이 먼저 등록되고 그 다음 prewarm 이 뜬다 — 실제 순서를 따른다.
+    await agent._open_session("CF1")
     agent._prewarm_tasks["CF1"] = asyncio.create_task(_done())
     await asyncio.sleep(0)
 
