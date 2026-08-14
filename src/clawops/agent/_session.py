@@ -52,6 +52,11 @@ class CallSession:
         self._media_ws: Any | None = None  # is_connected 체크용
         self._dtmf_collector_active: bool = False
         self._dtmf_queue: asyncio.Queue[str] = asyncio.Queue()
+        # 패시브 DTMF(=collect_dtmf 가 안 걸린 입력)의 debounce 버퍼. 통화별로 들고 있어야
+        # 동시 통화의 키패드가 서로 섞이지 않는다. flush 는 ClawOpsAgent 가 돌린다 —
+        # debounce 값이 에이전트 설정이라서다.
+        self._passive_dtmf_buffer: list[str] = []
+        self._passive_dtmf_task: asyncio.Task[None] | None = None
 
     def bind_transport(
         self,
@@ -123,6 +128,10 @@ class CallSession:
         elif not self._ended_event.is_set():
             self.status = "completed"
             self.ended_status = "completed"
+        # 아직 안 깨어난 패시브 DTMF flush 를 무효화한다. 취소하지 않는 이유는
+        # _flush_passive_dtmf 주석 참고 — 이미 주입 중인 flush 를 자르지 않기 위해서다.
+        self._passive_dtmf_task = None
+        self._passive_dtmf_buffer.clear()
         self._ended_event.set()
 
     async def _emit(self, event: str, *args: Any) -> None:

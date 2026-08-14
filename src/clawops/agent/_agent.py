@@ -96,9 +96,6 @@ class ClawOpsAgent:
 
         self._builtin_tools = resolve_builtin_tools(builtin_tools)
         self._passive_dtmf_debounce_ms = passive_dtmf_debounce_ms
-        self._passive_dtmf_buffer: list[str] = []
-        self._passive_dtmf_task: asyncio.Task[None] | None = None
-        self._passive_dtmf_call_id: str | None = None
         self._call_sessions: dict[str, Any] = {}  # call_id → pipeline Session (feed_dtmf용)
 
         self._tool_registry = ToolRegistry()
@@ -655,19 +652,25 @@ class ClawOpsAgent:
             asyncio.create_task(call.clear_audio())
             return
 
-        self._passive_dtmf_buffer.append(digit)
-        self._passive_dtmf_call_id = call.call_id
-        if self._passive_dtmf_task and not self._passive_dtmf_task.done():
-            self._passive_dtmf_task.cancel()
-        self._passive_dtmf_task = asyncio.create_task(self._flush_passive_dtmf())
+        call._passive_dtmf_buffer.append(digit)
+        call._passive_dtmf_task = asyncio.create_task(self._flush_passive_dtmf(call))
 
-    async def _flush_passive_dtmf(self) -> None:
-        """패시브 DTMF 버퍼를 flush하고 LLM에 주입한다."""
+    async def _flush_passive_dtmf(self, call: CallSession) -> None:
+        """이 통화의 패시브 DTMF 버퍼를 debounce 후 flush 해 LLM 에 주입한다.
+
+        앞선 flush 를 cancel 하지 않고, 깨어난 쪽이 "내가 아직 최신인가"를 확인해 스스로
+        물러난다. cancel 방식은 이미 sleep 을 지나 feed_dtmf 안에 들어간 flush 까지 잘라서
+        주입을 중간에 끊을 수 있었다. _mark_ended 가 _passive_dtmf_task 를 None 으로
+        비우므로 통화가 끝난 뒤 깨어난 flush 도 같은 검사에 걸려 아무것도 하지 않는다.
+        """
         await asyncio.sleep(self._passive_dtmf_debounce_ms / 1000)
-        digits = "".join(self._passive_dtmf_buffer)
-        self._passive_dtmf_buffer.clear()
-        if digits and self._passive_dtmf_call_id:
-            session_obj = self._call_sessions.get(self._passive_dtmf_call_id)
-            if session_obj:
-                await session_obj.feed_dtmf(digits)
-        self._passive_dtmf_call_id = None
+        if call._passive_dtmf_task is not asyncio.current_task():
+            return
+        digits = "".join(call._passive_dtmf_buffer)
+        call._passive_dtmf_buffer.clear()
+        call._passive_dtmf_task = None
+        if not digits:
+            return
+        session_obj = self._call_sessions.get(call.call_id)
+        if session_obj:
+            await session_obj.feed_dtmf(digits)
