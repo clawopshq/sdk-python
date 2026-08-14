@@ -63,10 +63,14 @@ async def on_failed(call, reason):
 | `direction` | `str` | `"inbound"` 또는 `"outbound"` |
 | `status` | `str` | 현재 상태. 아래 표 참고 |
 | `ended_status` | `str \| None` | 종료 사유. 통화가 끝나기 전에는 `None` |
-| `ended_duration` | `int \| None` | **서버가 확정한 통화 시간(초).** 통화가 끝나기 전에는 `None` |
+| `ended_duration` | `int \| None` | **서버가 확정한 통화 시간(초).** `call_end` 핸들러에서 읽을 수 있습니다. 서버가 값을 주지 않으면 `None` |
 | `start_time` | `datetime` | 통화 시작 시간 |
 | `duration` | `float` | SDK 가 로컬 시계로 재는 경과 시간 (초). 통화 중에도 읽힙니다 |
 | `metadata` | `dict` | 사용자 정의 메타데이터 |
+
+> `ended_duration` 은 서버의 종료 프레임이 도착할 때 채워집니다. 이 프레임은 미디어 스트림이
+> 닫힌 뒤에 오므로 `call_end` 핸들러가 도는 시점에는 아직 `None` 일 수 있습니다 — 종료 직후
+> 곧바로 읽지 말고, 짧게 뒤에 읽거나 통화 기록 적재 시점에 읽으세요.
 
 #### `status` / `ended_status` 값
 
