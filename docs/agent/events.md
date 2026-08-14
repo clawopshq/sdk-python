@@ -63,7 +63,7 @@ async def on_failed(call, reason):
 | `direction` | `str` | `"inbound"` 또는 `"outbound"` |
 | `status` | `str` | 현재 상태. 아래 표 참고 |
 | `ended_status` | `str \| None` | 종료 사유. 통화가 끝나기 전에는 `None` |
-| `ended_duration` | `int \| None` | **서버가 확정한 통화 시간(초).** `call_end` 핸들러에서 읽을 수 있습니다. 서버가 값을 주지 않으면 `None` |
+| `ended_duration` | `int \| None` | **서버가 확정한 통화 시간(초).** 아래 설명 참고 |
 | `start_time` | `datetime` | 통화 시작 시간 |
 | `duration` | `float` | SDK 가 로컬 시계로 재는 경과 시간 (초). 통화 중에도 읽힙니다 |
 | `metadata` | `dict` | 사용자 정의 메타데이터 |
@@ -71,6 +71,24 @@ async def on_failed(call, reason):
 > `ended_duration` 은 서버의 종료 프레임이 도착할 때 채워집니다. 이 프레임은 미디어 스트림이
 > 닫힌 뒤에 오므로 `call_end` 핸들러가 도는 시점에는 아직 `None` 일 수 있습니다 — 종료 직후
 > 곧바로 읽지 말고, 짧게 뒤에 읽거나 통화 기록 적재 시점에 읽으세요.
+
+#### `duration` 과 `ended_duration`
+
+| | 의미 | 언제 읽나 |
+|:--|:--|:--|
+| `duration` | SDK 가 로컬 시계로 재는 경과 시간 | 통화 중에도 읽힙니다 |
+| `ended_duration` | **서버가 확정한 통화 시간** | 통화가 끝난 뒤 |
+
+기록·정산에는 `ended_duration` 을 쓰세요. `duration` 은 세션이 붙기 전후의 오차를 포함합니다.
+
+**보통은 `call_end` 핸들러 안에서 바로 읽을 수 있습니다.** 서버는 미디어 스트림을 먼저 닫고
+정리를 마친 뒤에 종료 정보를 보내므로, SDK 가 그 값을 짧게 기다렸다가 `call_end` 를 발화합니다.
+
+> **전환(`transfer_call`)으로 끝나는 통화는 예외입니다.** 전환이 시작되면 AI 의 미디어 세션이
+> 먼저 끝나므로 `call_end` 가 그 시점에 발화하는데, **통화 자체는 담당자와 계속 이어지고 있습니다.**
+> 그래서 그 순간에는 전체 통화 시간이 아직 정해지지 않았고 `ended_duration` 은 `None` 입니다.
+> 전환 구간의 길이는 `transfer_call()` 의 반환값(`duration`)으로 받으시고, 전체 통화 시간이
+> 필요하면 통화 종료 webhook(`statusCallback`) 이나 통화 조회 API 를 쓰세요.
 
 #### `status` / `ended_status` 값
 
