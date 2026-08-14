@@ -70,14 +70,32 @@ agent = ClawOpsAgent(
 
 **한계 / 비목표**
 
-- **동시 outbound 통화 1건 가정** — ClawOpsAgent 1 인스턴스의 `session` 객체는 prewarm 시
-  단일 `_BufferingCall` 을 공유한다. 같은 인스턴스로 동시 outbound 통화를 발신하면 prewarm
-  race 가 발생할 수 있다. 다중 동시 outbound 가 필요하면 통화별로 별도 ClawOpsAgent 인스턴스를
-  사용하거나, session factory 패턴 도입이 필요하다 (후속 과제).
+- **`session=` 은 동시 통화 1건까지** — 그 객체를 모든 통화가 공유하므로 두 번째 통화가
+  첫 통화의 대화 이력과 오디오 경로를 덮어쓴다. 동시 통화가 있으면 `session_factory=` 를
+  쓴다 (아래 "동시 통화" 참고).
 - **Session 타입별 효과 차이** — Realtime (OpenAI / Gemini) 에서 LLM WS handshake +
   session.update 가 prewarm 으로 숨겨지므로 latency 절감 효과가 가장 크다. 반면
   `PipelineSession` 은 STT / LLM / TTS 가 lazy 연결되므로, prewarm 단계에서는 STT 루프 기동과
   greeting kickoff 정도만 선행되어 latency 절감 효과가 제한적이다.
+
+### 동시 통화
+
+한 프로세스가 통화 여러 건을 동시에 받으려면 `session` 대신 **`session_factory`** 를 준다.
+ClawOps 가 통화마다 팩토리를 호출해 새 세션을 만들고, 대화 이력·오디오 큐·전송 대상이
+그 통화 안에 갇힌다.
+
+```python
+agent = ClawOpsAgent(
+    from_="07012341234",
+    session_factory=lambda: OpenAIRealtime(system_prompt="..."),
+)
+```
+
+`session=` 을 주면 예전과 똑같이 동작한다 — 모든 통화가 같은 객체를 공유하므로
+**동시 통화 1건까지만 안전하다.** 두 번째 통화가 시작되면 원인을 지목하는 에러 로그가 남는다.
+
+동시 통화 한도 자체는 계정 요금제가 정한다(Individual 1 · Business 10). SDK 쪽 격리와는
+별개이므로, 회선을 여러 개 운영하더라도 프로세스를 나눌 필요는 없다.
 
 ### Call Transfer (통화 전환)
 

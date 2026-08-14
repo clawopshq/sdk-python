@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.44.0 (2026-08-14)
+
+### Added
+- **`session_factory=` — 한 프로세스로 동시 통화를 받습니다.** 통화마다 세션을 새로 만들어 대화 이력·오디오 경로·진행 중인 작업이 그 통화 안에 갇힙니다. 번호를 여러 개 운영하더라도 번호별로 프로세스를 나눌 필요가 없습니다.
+  ```python
+  agent = ClawOpsAgent(
+      from_="07012341234",
+      session_factory=lambda: OpenAIRealtime(system_prompt="..."),
+  )
+  ```
+  LiveKit 은 `session_factory=lambda: LiveKitSession(create)` 로 넘깁니다. HTTP 플러그인용 `http_context` 도 통화별로 열립니다.
+
+### Fixed
+- **동시 통화가 서로를 덮어쓰던 것.** `session=` 으로 넘긴 객체를 모든 통화가 공유했습니다. 두 번째 통화가 시작되면 첫 통화의 **대화 이력이 초기화되고 음성이 두 번째 통화 쪽으로 나갔으며**, 첫 통화가 끝날 때의 정리가 두 번째 통화를 내렸습니다. `session_factory=` 로 바꾸면 해결됩니다. `session=` 은 그대로 동작하지만 동시 통화 1건까지만 안전하며, 두 번째 통화가 시작되면 원인을 지목하는 에러 로그를 남깁니다.
+- **실패한 발신의 정리가 다른 통화를 끊던 것.** 응답 전에 실패한 통화를 정리하면서 공유 세션을 종료해, 그때 진행 중이던 다른 통화가 무음이 됐습니다.
+
+### Changed
+- `session` 과 `session_factory` 중 **정확히 하나**를 지정해야 합니다. 둘 다 없거나 둘 다 있으면 `AgentError` 입니다(예전에는 `session` 이 필수 인자라 `TypeError` 였습니다).
+
 ## 0.43.1 (2026-08-14)
 
 ### Fixed

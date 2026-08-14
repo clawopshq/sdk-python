@@ -3,7 +3,7 @@
 [LiveKit Agents](https://docs.livekit.io/agents/) 로 작성한 음성 에이전트를 **LiveKit
 서버도 SIP 도 없이** 실제 ClawOps 전화번호로 실행합니다.
 
-> 실험적 기능이라 API 가 바뀔 수 있고, 동시통화는 현재 1건입니다.
+> 실험적 기능이라 API 가 바뀔 수 있습니다.
 
 ## 설치
 
@@ -61,4 +61,7 @@ ClawOps 는 room 없는 transport 라, LiveKit 기능 중 room/서버에 묶인 
 - **`modalities=["text"]` 인데 `tts` 가 없으면** 소리가 안 납니다. ClawOps 는 이 경우
   시작 시점에 `ValueError` 를 던집니다.
 - **녹음·telemetry** 는 LiveKit `record=` 가 아니라 ClawOps 자체 기능을 씁니다.
-- **동시통화 1건** — 현재는 한 번에 한 통화만 처리합니다.
+- **동시통화** — `session_factory=lambda: LiveKitSession(create)` 로 넘기면 통화마다
+  세션을 새로 만들어 격리합니다. `session=LiveKitSession(create)` 는 통화 사이에 같은
+  객체를 공유하므로 동시통화 1건까지입니다. 팩토리 모드에서는 HTTP 플러그인용
+  `http_context` 도 통화별로 열립니다.
