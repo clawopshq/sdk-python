@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.45.1 (2026-08-14)
+
+### Fixed
+- **LiveKit 을 쓰면 `caller_id_mode` 가 없던 것.** 0.45.0 이 `transfer()` 와 내장 도구 스키마에는 넣었는데, LiveKit 경로는 `transfer_call` 을 따로 정의하고 있어 그쪽만 빠졌습니다. LiveKit 사용자는 AI 가 전환 발신번호를 고를 수 없었습니다.
+- 잘못된 `caller_id_mode` 값을 LiveKit 도구에서도 전환을 걸기 **전에** 거절합니다(다른 인자와 같은 규칙).
+
+### Changed
+- 개발용 의존성(`clawops[dev]`)에 `livekit-agents` 를 추가했습니다. 없으면 `tests/agent/test_livekit_*.py` 43개가 **항상 건너뛰어져** LiveKit 표면이 검증되지 않은 채 초록불로 보입니다 — 위 결함이 그렇게 새어 나갔습니다.
+
 ## 0.45.0 (2026-08-14)
 
 ### Added

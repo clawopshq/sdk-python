@@ -152,6 +152,7 @@ class ClawOpsPhoneTools(Toolset):
         mode: str = "blind",
         after_transfer: str = "terminate",
         whisper: str | None = None,
+        caller_id_mode: str | None = None,
         caller_id: str | None = None,
         timeout: int = 30,
     ) -> str:
@@ -163,7 +164,12 @@ class ClawOpsPhoneTools(Toolset):
             mode: blind(기본, 즉시 전환) 또는 warm(대상에게 whisper 후 연결)
             after_transfer: terminate(기본, AI 세션 종료) 또는 return(전환 종료 후 AI 복귀)
             whisper: warm 모드에서 대상에게 먼저 들려줄 안내 문구
-            caller_id: 전환 레그의 발신번호 오버라이드
+            caller_id_mode: 전환받는 쪽에 표시할 번호를 **의도**로 지정.
+                account(기본과 같음, 계정 번호) 또는 original(원 발신자 승계 선호 —
+                승계할 수 없는 통화면 계정 번호로 내려앉고 전환은 성사된다).
+            caller_id: 표시할 번호를 **직접** 지정. 계정 보유번호이거나 그 통화의 원
+                발신자여야 하고, 벗어나면 전환 자체가 실패한다. 웬만하면
+                caller_id_mode 를 쓴다. 둘 다 주면 caller_id 가 이긴다.
             timeout: 전환 대상 응답 대기 시간(초)
         """
         call = self._require_call()
@@ -179,6 +185,10 @@ class ClawOpsPhoneTools(Toolset):
             return f"Error: mode must be 'blind' or 'warm', got {mode!r}"
         if after_transfer not in ("terminate", "return"):
             return f"Error: after_transfer must be 'terminate' or 'return', got {after_transfer!r}"
+        if caller_id_mode is not None and caller_id_mode not in ("account", "original"):
+            return (
+                f"Error: caller_id_mode must be 'account' or 'original', got {caller_id_mode!r}"
+            )
         if not to.strip():
             return "Error: 'to' must not be empty"
 
@@ -189,6 +199,7 @@ class ClawOpsPhoneTools(Toolset):
             after_transfer=after_transfer,
             whisper=whisper,
             caller_id=caller_id,
+            caller_id_mode=caller_id_mode,  # type: ignore[arg-type]
             timeout=timeout,
         )
 
