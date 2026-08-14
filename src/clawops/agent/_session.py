@@ -32,6 +32,10 @@ class CallSession:
         # 서버가 통보한 최종 종료 상태. 통화가 끝나기 전에는 None.
         # completed(성사) / no-answer / busy / rejected / canceled / failed.
         self.ended_status: str | None = None
+        # 서버가 확정한 통화 시간(초). 통화가 끝나기 전에는 None.
+        # ⚠️ `duration` 과 다르다 — 그쪽은 SDK 가 로컬 시계로 재는 **경과 시간**이라 통화 중에도
+        # 읽히고, 세션이 붙기 전후의 오차를 포함한다. 기록·정산에 쓸 값은 이쪽이다.
+        self.ended_duration: int | None = None
         self.start_time = datetime.now()
         self.metadata: dict[str, Any] = {}
 

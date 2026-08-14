@@ -30,6 +30,15 @@ from .tracing._spans import call_span, mcp_connect_span, setup_tracing
 
 log = logging.getLogger("clawops.agent")
 
+# 미디어 정리 후 서버 종료 프레임을 기다리는 상한(초). 정상 경로에서는 밀리초 안에 풀리고,
+# 제어 연결이 죽어 프레임이 아예 안 올 때만 이 값을 다 쓴다.
+#
+# 🔴 이건 **임시 장치**다. 서버가 미디어 WS 를 먼저 닫고 정리를 마친 뒤에 종료 프레임을
+#    보내기 때문에 클라이언트가 그 순서를 보정하고 있다. 서버가 종료 프레임을 미디어 WS
+#    닫기 **전에** 보내게 되면 이 대기는 통째로 필요 없어진다. 다만 그때도 구 서버가 남아
+#    있는 동안은 유지해야 한다 — 버전 협상이 없어 "모두 새 서버" 를 확신할 방법이 없다.
+TERMINAL_FRAME_GRACE_S = 2.0
+
 
 class ToolConfig(TypedDict, total=False):
     """Tool 실행 관련 설정."""
@@ -113,6 +122,8 @@ class ClawOpsAgent:
         self._tool_registry = ToolRegistry()
         self._event_handlers: dict[str, list[Callable[..., Awaitable[None]]]] = {}
         self._active_sessions: dict[str, CallSession] = {}
+        # 미디어 정리를 마친 통화가 서버 종료 프레임을 기다리는 자리. call_id → Event.
+        self._terminal_waiters: dict[str, asyncio.Event] = {}
         self._control_ws: ControlWebSocket | None = None
         self._control_ws_task: asyncio.Task[Any] | None = None
         # prewarm 추적 — outbound_ready 수신 시 session.prewarm() 을 백그라운드 task 로
@@ -179,6 +190,11 @@ class ClawOpsAgent:
         if self._control_ws_task and not self._control_ws_task.done():
             self._control_ws_task.cancel()
             self._control_ws_task = None
+        # 제어 연결이 닫힌 뒤엔 종료 프레임이 올 수 없다 — 기다리는 통화를 즉시 깨우지 않으면
+        # 종료 중인 통화마다 상한(2초)을 통째로 헛쓴다. ControlWebSocket.close() 가 대기 중인
+        # 전환 future 를 정리하는 것과 같은 규율이다.
+        for waiter in list(self._terminal_waiters.values()):
+            waiter.set()
         self._active_sessions.clear()
         # 팩토리 모드에서 아직 안 치워진 통화 세션이 있으면 각자의 teardown 을 돌린다.
         for call_id in list(self._call_sessions):
@@ -582,6 +598,14 @@ class ClawOpsAgent:
                         await c.close()
                 if recorder:
                     recorder.stop()
+                # 서버가 확정한 통화 시간을 call_end 핸들러가 읽을 수 있게 잠깐 기다린다.
+                # 서버는 미디어 WS 를 먼저 닫고 자원 정리 뒤에 control 종료 프레임을 보내므로
+                # (call-handler.js 의 STAGE 순서), 안 기다리면 ended_duration 은 인바운드
+                # 사용자에게 **영영 None** 이다 — call_end 가 그들의 유일한 통로다.
+                #
+                # 종료 프레임 자체는 예전부터 늘 오던 것이라(내용만 바뀐다) 구·신 서버 모두
+                # 밀리초 안에 풀린다. 제어 연결이 죽어 안 오는 경우만 상한을 다 쓴다.
+                await self._await_server_terminal(call)
                 await call._emit("call_end")
                 call._mark_ended()
                 self._active_sessions.pop(call.call_id, None)
@@ -715,22 +739,56 @@ class ClawOpsAgent:
         # failed). 예전에는 이 값을 버리고 전부 'completed' 로 표시해 상대가 받지 않은
         # 통화를 성사된 통화와 구분할 수 없었다.
         status = data.get("status") or "completed"
+        # 서버가 확정한 통화 시간. 구 서버는 이 값을 안 보내거나 0 을 보내므로 그대로 둔다 —
+        # 없는 값을 로컬 계산으로 지어내면 어느 쪽인지 구분할 수 없게 된다.
+        duration = data.get("duration")
         call = self._active_sessions.get(call_id)
         log.info(f"Call ended (server): {call_id} (status={status})")
         if call:
             call.status = status
             call.ended_status = status
+            if duration is not None:
+                call.ended_duration = duration
             if status != "completed":
                 # 미연결 종료. call_start 가 없었으므로 call_end 도 발화되지 않는다 —
                 # 이 이벤트가 발신 실패를 알 수 있는 유일한 통로다.
                 log.info(f"Outbound call not connected: {call_id} ({status})")
                 await call._emit("call_failed", status)
             call._mark_ended(status)
+        # 미디어 정리를 마치고 이 프레임을 기다리는 통화가 있으면 깨운다(_await_server_terminal).
+        waiter = self._terminal_waiters.get(call_id)
+        if waiter is not None:
+            waiter.set()
         self._active_sessions.pop(call_id, None)
         # 순서가 중요하다 — _cleanup_prewarm 이 이 통화의 세션을 stop() 해야 하므로
         # 등록을 지우기 전에 돌린다.
         await self._cleanup_prewarm(call_id)
         await self._close_session(call_id)
+
+    async def _await_server_terminal(self, call: CallSession) -> None:
+        """서버 종료 프레임을 짧게 기다린다. 미디어 정리 직후에만 부른다.
+
+        왜 기다리나: `call_end` 는 인바운드 사용자가 통화 결과를 받는 **유일한 통로**인데,
+        서버는 미디어 WS 를 먼저 닫고 자원 정리를 마친 뒤에야 control 종료 프레임을 보낸다.
+        안 기다리면 그 핸들러 안에서 `ended_duration` 은 영영 None 이다.
+
+        상한을 다 쓰는 경우는 제어 연결이 죽어 프레임이 아예 안 오는 때뿐이다 — 그 프레임은
+        예전부터 늘 오던 것이고(이번에 바뀐 건 내용뿐), 정상 경로에서는 밀리초 안에 풀린다.
+        """
+        if call.ended_duration is not None:
+            return
+        waiter = asyncio.Event()
+        self._terminal_waiters[call.call_id] = waiter
+        try:
+            await asyncio.wait_for(waiter.wait(), TERMINAL_FRAME_GRACE_S)
+        except asyncio.TimeoutError:
+            log.debug(
+                "서버 종료 프레임이 %.1f초 안에 오지 않았다 — ended_duration 없이 진행: %s",
+                TERMINAL_FRAME_GRACE_S,
+                call.call_id,
+            )
+        finally:
+            self._terminal_waiters.pop(call.call_id, None)
 
     def _on_dtmf_event(self, call: CallSession, digit: str) -> None:
         """DTMF 수신 시 호출. collector 또는 패시브 모드로 라우팅."""
