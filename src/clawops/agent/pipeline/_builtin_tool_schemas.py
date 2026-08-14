@@ -7,10 +7,22 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 from .._builtin_tools import BuiltinTool
 from .._session import CallSession
+
+log = logging.getLogger("clawops.agent")
+
+
+def _log_transfer_failure(task: Any) -> None:
+    """fire-and-forget 전환 태스크의 예외를 로그로 끌어낸다."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("transfer_call 도구가 건 전환이 실패했다: %r", exc)
 
 # ── 정규 스키마 (neutral 포맷) ──────────────────────────────────────
 
@@ -78,9 +90,14 @@ _TRANSFER_CALL = {
                 "type": "string",
                 "description": "Message to speak to transfer target before connecting customer (warm mode only)",
             },
+            "caller_id_mode": {
+                "type": "string",
+                "enum": ["account", "original"],
+                "description": "What the transfer target sees as the caller. account: the account's own number (default). original: prefer the inbound caller's number, falling back to the account number when it cannot be inherited. Prefer this over caller_id.",
+            },
             "caller_id": {
                 "type": "string",
-                "description": "Override caller ID for the transfer leg",
+                "description": "Exact caller ID for the transfer leg. Must be a number the account owns, or the original inbound caller. Anything else fails the transfer outright — use caller_id_mode unless a specific number is required.",
             },
             "timeout": {
                 "type": "integer",
@@ -208,7 +225,10 @@ async def execute_builtin_tool(
             # call-engine이 transfer 시작 시 media WS를 닫으므로,
             # 결과를 await하면 LLM 세션이 먼저 종료된다.
             import asyncio
-            asyncio.ensure_future(call.transfer(**args))
+            task = asyncio.ensure_future(call.transfer(**args))
+            # 결과를 안 기다리므로 실패가 통째로 조용하다 — 모델은 "시작됨" 을 받고,
+            # 예외는 태스크 안에 갇힌다. 최소한 로그에는 남긴다.
+            task.add_done_callback(_log_transfer_failure)
             return json.dumps({"status": "transfer_initiated"})
         except Exception as e:
             return f"Error: {e}"
