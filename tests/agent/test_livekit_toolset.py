@@ -117,6 +117,37 @@ async def test_transfer_valid_args_fires() -> None:
     call._transfer_fn.assert_awaited_once()
 
 
+async def test_transfer_forwards_caller_id_mode() -> None:
+    """LiveKit 툴셋은 transfer_call 을 따로 정의한다 — 공용 스키마와 따로 놀면 안 된다.
+
+    0.45.0 에서 CallSession.transfer 와 내장 도구 스키마에는 caller_id_mode 를 넣었는데
+    이 파일만 빠져 있었다. LiveKit 을 쓰는 사용자만 조용히 이 기능이 없는 상태가 된다.
+    """
+    tools = ClawOpsPhoneTools()
+    call = _make_call()
+    tools.set_call(call)
+
+    result = await tools._transfer_call(None, to="01012345678", caller_id_mode="original")
+
+    assert "transfer_initiated" in result
+    await asyncio.sleep(0)
+    # transfer() 는 서버로 나갈 payload 를 위치인자 dict 로 넘긴다 — 키는 camelCase 다.
+    payload = call._transfer_fn.await_args.args[0]
+    assert payload["callerIdMode"] == "original"
+
+
+async def test_transfer_rejects_bad_caller_id_mode_before_firing() -> None:
+    """서버는 모르는 값을 조용히 무시한다 — 오타면 켠 줄 알고 계정 번호가 나간다."""
+    tools = ClawOpsPhoneTools()
+    call = _make_call()
+    tools.set_call(call)
+
+    result = await tools._transfer_call(None, to="010", caller_id_mode="origianl")
+
+    assert "Error" in result and "caller_id_mode" in result
+    call._transfer_fn.assert_not_awaited()
+
+
 async def test_tool_before_call_bound_errors_cleanly() -> None:
     tools = ClawOpsPhoneTools()
     with pytest.raises(RuntimeError, match="연결되지 않았"):

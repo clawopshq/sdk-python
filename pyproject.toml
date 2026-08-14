@@ -49,6 +49,11 @@ dev = [
     "aiohttp>=3.9.0,<4",
     "google-genai>=1.60.0",
     "openai[realtime]>=2.0.0",
+    # tests/agent/test_livekit_*.py 는 importorskip 으로 걸려 있다. 여기에 없으면
+    # 로컬에서도 CI(publish.yml 의 pip install -e ".[dev]")에서도 **항상 skip** 되어
+    # LiveKit 표면 전체가 초록불인 채 검증 0 이 된다 — 실제로 그래서 0.45.0 이
+    # LiveKit 툴셋만 caller_id_mode 를 빠뜨린 채 나갔다.
+    "livekit-agents>=1.6.5",
 ]
 
 # Agent
