@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.46.0 (2026-08-15)
+
+### Added
+- **`CallSession.ended_duration` — 서버가 확정한 통화 시간.** 종료 이벤트가 실어 보내던 값을 지금까지 SDK 가 읽지 않아, 통화 기록을 자체 시스템에 적재하려면 REST 를 다시 조회하거나 로컬 시계로 잰 값을 써야 했습니다. 이제 종료 이벤트 하나로 기록을 마칠 수 있습니다.
+  ```python
+  @agent.on("call_end")
+  async def on_end(call):
+      print(call.ended_status, call.ended_duration)   # completed 91
+  ```
+  - `duration` 은 그대로 둡니다 — 그쪽은 **SDK 가 로컬 시계로 재는 경과 시간**이라 통화 중에도 읽히고, 세션이 붙기 전후의 오차를 포함합니다. 기록·정산에 쓸 값은 `ended_duration` 입니다.
+  - 서버가 값을 보내지 않으면 `None` 을 유지합니다. **서버 배포가 선행되어야** 실제 값이 들어옵니다 — 그 전까지는 `None` 입니다.
+
 ## 0.45.1 (2026-08-14)
 
 ### Fixed
