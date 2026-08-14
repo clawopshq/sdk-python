@@ -11,7 +11,6 @@ import math
 import os
 import signal
 import time
-import weakref
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 from .._exceptions import AgentError
@@ -33,6 +32,11 @@ log = logging.getLogger("clawops.agent")
 
 # 미디어 정리 후 서버 종료 프레임을 기다리는 상한(초). 정상 경로에서는 밀리초 안에 풀리고,
 # 제어 연결이 죽어 프레임이 아예 안 올 때만 이 값을 다 쓴다.
+#
+# 🔴 이건 **임시 장치**다. 서버가 미디어 WS 를 먼저 닫고 정리를 마친 뒤에 종료 프레임을
+#    보내기 때문에 클라이언트가 그 순서를 보정하고 있다. 서버가 종료 프레임을 미디어 WS
+#    닫기 **전에** 보내게 되면 이 대기는 통째로 필요 없어진다. 다만 그때도 구 서버가 남아
+#    있는 동안은 유지해야 한다 — 버전 협상이 없어 "모두 새 서버" 를 확신할 방법이 없다.
 TERMINAL_FRAME_GRACE_S = 2.0
 
 
@@ -118,13 +122,6 @@ class ClawOpsAgent:
         self._tool_registry = ToolRegistry()
         self._event_handlers: dict[str, list[Callable[..., Awaitable[None]]]] = {}
         self._active_sessions: dict[str, CallSession] = {}
-        # 미디어 WS 가 닫혀 정리를 마친 통화. 서버는 media stop → 자원 정리 → control
-        # `call.ended` 순서로 보내므로, 종료 프레임이 도착할 때 이미 _active_sessions 에서
-        # 빠져 있는 게 정상 경로다. 그때도 서버 확정값(ended_duration)을 실어줄 수 있도록
-        # 약한 참조로 잠시 남긴다 — 사용자가 CallSession 을 놓으면 같이 사라져 누수는 없다.
-        self._recent_sessions: weakref.WeakValueDictionary[str, CallSession] = (
-            weakref.WeakValueDictionary()
-        )
         # 미디어 정리를 마친 통화가 서버 종료 프레임을 기다리는 자리. call_id → Event.
         self._terminal_waiters: dict[str, asyncio.Event] = {}
         self._control_ws: ControlWebSocket | None = None
@@ -193,6 +190,11 @@ class ClawOpsAgent:
         if self._control_ws_task and not self._control_ws_task.done():
             self._control_ws_task.cancel()
             self._control_ws_task = None
+        # 제어 연결이 닫힌 뒤엔 종료 프레임이 올 수 없다 — 기다리는 통화를 즉시 깨우지 않으면
+        # 종료 중인 통화마다 상한(2초)을 통째로 헛쓴다. ControlWebSocket.close() 가 대기 중인
+        # 전환 future 를 정리하는 것과 같은 규율이다.
+        for waiter in list(self._terminal_waiters.values()):
+            waiter.set()
         self._active_sessions.clear()
         # 팩토리 모드에서 아직 안 치워진 통화 세션이 있으면 각자의 teardown 을 돌린다.
         for call_id in list(self._call_sessions):
@@ -607,8 +609,6 @@ class ClawOpsAgent:
                 await call._emit("call_end")
                 call._mark_ended()
                 self._active_sessions.pop(call.call_id, None)
-                # grace 를 넘겨 도착한 프레임도 이 세션을 찾을 수 있게 남긴다.
-                self._recent_sessions[call.call_id] = call
                 await self._close_session(call.call_id)
                 self._prewarm_attached.discard(call.call_id)
 
@@ -755,14 +755,6 @@ class ClawOpsAgent:
                 log.info(f"Outbound call not connected: {call_id} ({status})")
                 await call._emit("call_failed", status)
             call._mark_ended(status)
-        elif duration is not None:
-            # 정상 종료의 표준 순서다: 서버가 미디어 WS 를 먼저 닫고(→ SDK 가 call_end 를
-            # 발화하고 _active_sessions 에서 뺀다) 자원 정리 뒤에 이 프레임을 보낸다.
-            # 여기서 값을 버리면 성사된 통화의 ended_duration 은 영원히 None 이 된다.
-            # 상태(ended_status)는 이미 확정돼 있으므로 건드리지 않고 시간만 채운다.
-            retired = self._recent_sessions.get(call_id)
-            if retired is not None:
-                retired.ended_duration = duration
         # 미디어 정리를 마치고 이 프레임을 기다리는 통화가 있으면 깨운다(_await_server_terminal).
         waiter = self._terminal_waiters.get(call_id)
         if waiter is not None:

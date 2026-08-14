@@ -81,24 +81,24 @@ async def test_local_duration_is_untouched():
     assert call.duration != 91, "로컬 경과 시간이 서버 값으로 덮이면 안 된다"
 
 
-@pytest.mark.asyncio
-async def test_duration_lands_after_media_teardown_popped_the_session():
+def test_grace_runs_before_the_session_is_popped():
     """정상 종료의 표준 순서 — 서버는 미디어 WS 를 먼저 닫고 나중에 종료 프레임을 보낸다.
 
-    그 시점에 세션은 이미 _active_sessions 에서 빠져 있다. 여기서 값을 버리면 성사된
-    통화(=이 기능의 주 대상)의 ended_duration 은 영원히 None 이 된다.
+    그래서 grace 는 반드시 `_active_sessions.pop` **앞**에 있어야 한다. 뒤로 가면 프레임이
+    도착할 때 세션이 이미 빠져 있어 값을 버리게 되고, 그러면 성사된 통화(=이 기능의 주
+    대상)의 ended_duration 은 영원히 None 이다.
+
+    이 순서가 곧 "늦게 온 프레임용 별도 보관소"를 불필요하게 만든다 — 기다리는 동안
+    세션은 원래 자리에 그대로 있다.
     """
-    agent, call = make_agent_with_call()
+    import inspect
+    import clawops.agent._agent as agent_mod
 
-    # 미디어 정리 경로가 한 일: 종료 확정 + active 에서 제거.
-    call._mark_ended()
-    agent._active_sessions.pop("CA_x", None)
-    agent._recent_sessions["CA_x"] = call
+    flat = " ".join(inspect.getsource(agent_mod.ClawOpsAgent._start_call_session).split())
 
-    await agent._handle_ended({"callId": "CA_x", "status": "completed", "duration": 91})
-
-    assert call.ended_duration == 91
-    assert call.ended_status == "completed"
+    assert flat.index("_await_server_terminal(call)") < flat.index("_active_sessions.pop"), (
+        "grace 가 pop 뒤로 가면 종료 프레임이 세션을 못 찾는다"
+    )
 
 
 def test_new_session_starts_with_none():
@@ -187,3 +187,21 @@ def test_media_teardown_actually_waits_for_the_terminal_frame():
     assert flat.index("_await_server_terminal(call)") < flat.index('_emit("call_end")'), (
         "grace 는 call_end 발화 **전**이어야 한다"
     )
+
+
+@pytest.mark.asyncio
+async def test_disconnect_wakes_waiting_calls():
+    """제어 연결이 닫히면 종료 프레임은 올 수 없다 — 기다리던 통화를 즉시 놓아줘야 한다.
+
+    안 그러면 종료 중인 통화마다 상한을 통째로 헛쓴다. 빠른 종료가 가장 중요한 경로다.
+    """
+    import asyncio
+
+    agent, call = make_agent_with_call()
+    waiting = asyncio.create_task(agent._await_server_terminal(call))
+    await asyncio.sleep(0)  # waiter 가 등록될 틈
+
+    await agent.disconnect()
+
+    await asyncio.wait_for(waiting, timeout=0.5)
+    assert agent._terminal_waiters == {}
