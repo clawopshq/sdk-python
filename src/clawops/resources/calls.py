@@ -6,8 +6,25 @@ from .._resource import AsyncAPIResource, SyncAPIResource
 from .._utils import strip_not_given
 from ..pagination import AsyncPage, SyncPage
 from ..types.call import Call, CallControlResponse
+from ..types.call_params import CallContextParam
 from ..types.summary import SummaryStatus
 from ..types.transcript import TranscriptRequestAccepted, TranscriptStatus
+
+
+def _call_context_body(ctx: CallContextParam | None) -> dict[str, object] | None:
+    """``call_context``\\를 REST 본문의 PascalCase 로 옮긴다.
+
+    파라미터는 snake_case(``instruction``/``variables``)로 받지만 서버는 PascalCase 만
+    받는다(스펙상 ``additionalProperties: false`` 라 snake_case 를 그대로 보내면 400).
+    ``strip_not_given`` 은 최상위 키만 훑으므로 중첩 객체는 여기서 직접 정리한다.
+    """
+    if ctx is None:
+        return None
+    body: dict[str, object] = {"Instruction": ctx["instruction"]}
+    variables = ctx.get("variables")
+    if variables is not None:
+        body["Variables"] = variables
+    return body
 
 
 class Calls(SyncAPIResource):
@@ -19,6 +36,10 @@ class Calls(SyncAPIResource):
         to: str,
         from_: str,
         url: str | None = None,
+        agent_id: str | None = None,
+        call_context: CallContextParam | None = None,
+        call_flow_id: str | None = None,
+        variables: dict[str, str | float | bool] | None = None,
         status_callback: str | None = None,
         status_callback_event: str | None = None,
         timeout: int | None = None,
@@ -32,14 +53,29 @@ class Calls(SyncAPIResource):
         PSTN 번호로 아웃바운드 전화를 발신합니다.
         From 번호는 계정에 등록된 번호여야 합니다.
 
-        **2가지 모드:**
-        - VoiceML 모드: ``url``을 지정하면 VoiceML로 통화를 제어합니다.
-        - Agent 모드: ``url``을 생략하면 Agent SDK로 통화가 연결됩니다.
+        **4가지 모드** — ``url``, ``agent_id``, ``call_flow_id``는 서로 배타적입니다:
+
+        - **VoiceML 모드**: ``url``을 지정하면 VoiceML로 통화를 제어합니다.
+        - **매니지드 에이전트 모드**: ``agent_id``를 지정하면 콘솔에서 만든 AI 에이전트가
+          통화를 처리합니다.
+        - **콜 플로우 모드**: ``call_flow_id``를 지정하면 결정적 ARS 플로우가 진행합니다.
+        - **Agent SDK 모드**: 셋 다 생략하면 From 번호에 연결된 Agent SDK로 연결됩니다.
 
         Args:
             to: 수신 전화번호.
             from_: 발신 번호. 계정에 등록된 번호여야 합니다.
-            url: VoiceML 명령을 반환할 URL.
+            url: VoiceML 명령을 반환할 URL. ``agent_id``·``call_flow_id``와 배타.
+            agent_id: 콘솔에서 만든 매니지드 에이전트 ID. ``url``·``call_flow_id``와 배타.
+            call_context: ``agent_id`` 에이전트의 **이번 통화에만** 적용되는 컨텍스트.
+                ``{"instruction": "...", "variables": {...}}`` 형태. 에이전트 자체 설정은
+                그대로 두고 이 통화만 다르게 행동시킬 때 쓴다. 같은 에이전트로 동시에 거는
+                다른 통화에는 영향이 없다.
+            call_flow_id: 콜 플로우(결정적 ARS) ID. ``url``·``agent_id``와 배타.
+                ID는 ``client.call_flows.list()``로 조회한다.
+            variables: 콜 플로우 시작 변수. 멘트·URL·본문의 ``{{이름}}``이 이 값으로 치환된다.
+                ``call_flow_id``와 함께일 때만 쓸 수 있다(단독 지정 시 400).
+                ``caller``·``callee``·``recording_url``·``recording_duration``·``http_status``는
+                통화 중 자동으로 채워지는 예약 변수라 지정할 수 없다.
             status_callback: 통화 상태 변경 시 POST 요청을 받을 콜백 URL.
             status_callback_event: 수신할 상태 이벤트 목록 (공백 구분).
             timeout: 발신 타임아웃 (초). 기본값: 60.
@@ -53,7 +89,8 @@ class Calls(SyncAPIResource):
             생성된 Call 객체.
 
         Raises:
-            BadRequestError: From 번호가 계정에 등록되지 않았거나 필수 필드 누락.
+            BadRequestError: From 번호가 계정에 등록되지 않았거나, 배타 필드를 함께 지정했거나,
+                ``variables``를 ``call_flow_id`` 없이 단독 지정한 경우.
             AuthenticationError: 유효하지 않은 API 키.
             PermissionDeniedError: accountId 불일치.
             InternalServerError: 발신 실패.
@@ -64,6 +101,10 @@ class Calls(SyncAPIResource):
                 "To": to,
                 "From": from_,
                 "Url": url,
+                "AgentId": agent_id,
+                "CallContext": _call_context_body(call_context),
+                "CallFlowId": call_flow_id,
+                "Variables": variables,
                 "StatusCallback": status_callback,
                 "StatusCallbackEvent": status_callback_event,
                 "Timeout": timeout,
@@ -307,6 +348,10 @@ class AsyncCalls(AsyncAPIResource):
         to: str,
         from_: str,
         url: str | None = None,
+        agent_id: str | None = None,
+        call_context: CallContextParam | None = None,
+        call_flow_id: str | None = None,
+        variables: dict[str, str | float | bool] | None = None,
         status_callback: str | None = None,
         status_callback_event: str | None = None,
         timeout: int | None = None,
@@ -321,6 +366,10 @@ class AsyncCalls(AsyncAPIResource):
                 "To": to,
                 "From": from_,
                 "Url": url,
+                "AgentId": agent_id,
+                "CallContext": _call_context_body(call_context),
+                "CallFlowId": call_flow_id,
+                "Variables": variables,
                 "StatusCallback": status_callback,
                 "StatusCallbackEvent": status_callback_event,
                 "Timeout": timeout,

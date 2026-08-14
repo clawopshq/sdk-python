@@ -46,6 +46,63 @@ class TestCallsCreate:
         parsed = json.loads(route.calls[0].request.content)
         assert parsed["StatusCallback"] == "https://my-app.com/status"
 
+    @respx.mock
+    def test_create_with_agent_id(self, calls):
+        route = respx.post(f"{BASE}{CALLS_PATH}").mock(return_value=httpx.Response(201, json=CALL_JSON))
+        calls.create(to="01012345678", from_="07052358010", agent_id="cmagent123")
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["AgentId"] == "cmagent123"
+        # 배타 필드는 보내지 않은 채로 남아야 한다 — 빈 값이라도 실리면 서버가 400 으로 막는다.
+        assert "Url" not in parsed
+        assert "CallFlowId" not in parsed
+
+    @respx.mock
+    def test_create_with_call_context_uses_pascal_case(self, calls):
+        """call_context 는 snake_case 로 받지만 본문은 PascalCase 여야 한다.
+
+        서버 스펙이 CallContext 에 additionalProperties:false 라, snake_case 를 그대로
+        흘려보내면 400 이 난다. 변환이 빠지면 이 테스트가 먼저 깨진다.
+        """
+        route = respx.post(f"{BASE}{CALLS_PATH}").mock(return_value=httpx.Response(201, json=CALL_JSON))
+        calls.create(
+            to="01012345678",
+            from_="07052358010",
+            agent_id="cmagent123",
+            call_context={"instruction": "예약 확인만 하고 끊어라", "variables": {"orderId": "A-1234"}},
+        )
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["CallContext"] == {
+            "Instruction": "예약 확인만 하고 끊어라",
+            "Variables": {"orderId": "A-1234"},
+        }
+
+    @respx.mock
+    def test_create_with_call_context_omits_absent_variables(self, calls):
+        route = respx.post(f"{BASE}{CALLS_PATH}").mock(return_value=httpx.Response(201, json=CALL_JSON))
+        calls.create(to="010", from_="070", agent_id="cmagent123",
+                     call_context={"instruction": "본인확인만 하라"})
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["CallContext"] == {"Instruction": "본인확인만 하라"}
+
+    @respx.mock
+    def test_create_with_call_flow_and_variables(self, calls):
+        route = respx.post(f"{BASE}{CALLS_PATH}").mock(return_value=httpx.Response(201, json=CALL_JSON))
+        calls.create(to="01012345678", from_="07052358010",
+                     call_flow_id="cmryw3ycm000001s6on0kp9a8",
+                     variables={"name": "홍길동", "orderId": "A-1234"})
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["CallFlowId"] == "cmryw3ycm000001s6on0kp9a8"
+        assert parsed["Variables"] == {"name": "홍길동", "orderId": "A-1234"}
+
+    @respx.mock
+    def test_create_agent_sdk_mode_sends_no_routing_field(self, calls):
+        """셋 다 생략 = Agent SDK 모드. 라우팅 키가 하나도 실리면 안 된다."""
+        route = respx.post(f"{BASE}{CALLS_PATH}").mock(return_value=httpx.Response(201, json=CALL_JSON))
+        calls.create(to="01012345678", from_="07052358010")
+        parsed = json.loads(route.calls[0].request.content)
+        assert set(parsed) == {"To", "From"}
+
+
 class TestCallsList:
     @respx.mock
     def test_list_calls(self, calls):

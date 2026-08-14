@@ -9,13 +9,31 @@ from .._utils import PropertyInfo
 # ── Call API 파라미터 ────────────────────────────────────────────────────────
 
 
+class CallContextParam(TypedDict, total=False):
+    """``agent_id`` 에이전트의 **이번 통화에만** 적용되는 컨텍스트.
+
+    에이전트 자체의 설정은 그대로 두고 이 통화만 다르게 행동시킬 때 사용합니다.
+    같은 에이전트로 동시에 거는 다른 통화에는 영향이 없습니다.
+    """
+
+    instruction: Required[Annotated[str, PropertyInfo(alias="Instruction")]]
+    """이번 통화에서 수행할 실행 요구사항 (최대 4000자)."""
+
+    variables: Annotated[dict[str, Union[str, float, bool]], PropertyInfo(alias="Variables")]
+    """요구사항에서 참조할 통화별 구조화 데이터 (최대 50개)."""
+
+
 class CallCreateParams(TypedDict, total=False):
     """발신 전화 생성 요청 파라미터.
 
-    **2가지 모드:**
+    **4가지 모드** — ``url``\\, ``agent_id``\\, ``call_flow_id``\\는 서로 배타적입니다.
 
     - **VoiceML 모드**: ``url``\\을 지정하면 VoiceML로 통화를 제어합니다.
-    - **Agent 모드**: ``url``\\을 생략하면 Agent SDK로 통화가 연결됩니다.
+    - **매니지드 에이전트 모드**: ``agent_id``\\를 지정하면 콘솔에서 만든 AI 에이전트가
+      통화를 처리합니다. ``call_context``\\로 이번 통화만의 지시를 덧붙일 수 있습니다.
+    - **콜 플로우 모드**: ``call_flow_id``\\를 지정하면 결정적 ARS 플로우가 통화를
+      진행합니다. ``variables``\\로 시작 변수를 넘깁니다.
+    - **Agent SDK 모드**: 셋 다 생략하면 From 번호에 연결된 Agent SDK로 통화가 연결됩니다.
     """
 
     to: Required[Annotated[str, PropertyInfo(alias="To")]]
@@ -25,7 +43,19 @@ class CallCreateParams(TypedDict, total=False):
     """발신 번호. 계정에 등록된 번호여야 합니다."""
 
     url: Annotated[str, PropertyInfo(alias="Url")]
-    """통화 연결 시 VoiceML 명령을 반환할 URL."""
+    """통화 연결 시 VoiceML 명령을 반환할 URL. ``agent_id``\\·``call_flow_id``\\와 배타."""
+
+    agent_id: Annotated[str, PropertyInfo(alias="AgentId")]
+    """콘솔에서 만든 매니지드 에이전트 ID. ``url``\\·``call_flow_id``\\와 배타."""
+
+    call_context: Annotated[CallContextParam, PropertyInfo(alias="CallContext")]
+    """``agent_id`` 에이전트의 이번 통화에만 적용되는 컨텍스트."""
+
+    call_flow_id: Annotated[str, PropertyInfo(alias="CallFlowId")]
+    """콜 플로우(결정적 ARS) ID. ``url``\\·``agent_id``\\와 배타."""
+
+    variables: Annotated[dict[str, Union[str, float, bool]], PropertyInfo(alias="Variables")]
+    """콜 플로우 시작 변수. ``call_flow_id``\\와 함께일 때만 사용할 수 있습니다."""
 
     status_callback: Annotated[str, PropertyInfo(alias="StatusCallback")]
     """통화 상태 변경 시 POST 요청을 받을 콜백 URL."""
@@ -35,6 +65,9 @@ class CallCreateParams(TypedDict, total=False):
 
     timeout: Annotated[int, PropertyInfo(alias="Timeout")]
     """발신 타임아웃 (초). 기본값: 60."""
+
+    machine_detection: Annotated[Literal["Enable", "Hangup"], PropertyInfo(alias="MachineDetection")]
+    """자동응답기/음성사서함 감지(AMD)."""
 
 
 class CallListParams(TypedDict, total=False):
