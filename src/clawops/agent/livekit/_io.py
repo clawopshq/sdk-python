@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -43,7 +44,14 @@ FRAME_BYTES = 160
 """μ-law 20ms = 160바이트."""
 
 ULAW_SILENCE = b"\xff"
-"""μ-law 무음 — 마지막 프레임 패딩용 (`_pipeline_session.py` 와 동일)."""
+"""μ-law 무음."""
+
+_TAIL_PAD = os.environ.get("CLAWOPS_TAIL_PAD") == "1"
+"""세그먼트 끝 자투리를 무음으로 채워 보낼지 (기본: 안 채움).
+
+⛔ 킬스위치다. 엔진이 자투리를 못 받는 구버전으로 롤백될 때만 켠다 —
+   `RTP_SEND_QUEUE_MODE=legacy` 를 켤 거면 **이것도 함께(또는 먼저)** 켜야 한다.
+   구 엔진 + 비패딩 SDK 조합은 세그먼트마다 짧은 RTP 패킷을 만든다."""
 
 _MARK_TIMEOUT_MARGIN = 10.0
 """mark 대기 timeout = 밀어넣은 오디오 길이 + 이 여유."""
@@ -236,10 +244,22 @@ class ClawOpsAudioOutput(io.AudioOutput):
 
         interrupted = True
         try:
-            # 남은 자투리를 무음으로 패딩해 한 프레임으로 내보낸다.
+            # 남은 자투리를 **그대로** 내보낸다.
+            #
+            # 예전엔 여기서 무음으로 채워 160바이트를 맞췄다. 그게 발화 한가운데
+            # 0~19ms 짜리 구멍을 만들고 있었다 — 이 시점의 우리는 뒤에 오디오가 더
+            # 오는지 모르는 채로 매번 세그먼트를 닫기 때문이다. 실측(2026-08-19):
+            # 실통화 녹음의 발화 중 갭이 11/11 · 27/27 모두 끝 위치 `mod 160 = 0`,
+            # 길이는 전부 160 미만, 경계 진폭 3132 — 우연히 정렬될 수 없는 지문이다.
+            #
+            # 「뒤에 더 오는가」는 큐를 들고 있는 엔진만 안다. 그래서 판단을 그쪽으로
+            # 넘긴다. 엔진은 바로 아래 `_await_playout` 의 mark 를 세그먼트 끝 신호로
+            # 읽어 그 자리에서 채워 내보낸다(못 읽으면 40ms 안에 안전판이 닫는다).
             tail, self._tail = self._tail, b""
             if tail:
-                await self._call.send_audio(tail + ULAW_SILENCE * (FRAME_BYTES - len(tail)))
+                if _TAIL_PAD:
+                    tail += ULAW_SILENCE * (FRAME_BYTES - len(tail))
+                await self._call.send_audio(tail)
 
             interrupted = await self._await_playout()
         except Exception:
