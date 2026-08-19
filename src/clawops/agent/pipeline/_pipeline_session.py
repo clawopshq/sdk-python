@@ -306,16 +306,19 @@ class PipelineSession:
                     break
                 pcm8k = resample_pcm16(audio, from_rate=tts_sample_rate, to_rate=8000)
                 ulaw = pcm16_to_ulaw(pcm8k)
-                for off in range(0, len(ulaw), 160):
-                    chunk = ulaw[off : off + 160]
-                    if len(chunk) < 160:
-                        chunk = chunk + b"\xff" * (160 - len(chunk))
-                    if not self._first_audio_logged:
-                        from ._buffering_call import log_first_realtime_audio
-                        log_first_realtime_audio(self._call)
-                        self._first_audio_logged = True
-                    await self._call.send_audio(chunk)
-                    self._sent_audio_chunks += 1
+                # delta 를 **자르지도 채우지도 않고** 그대로 넘긴다.
+                #
+                # 예전엔 여기서 160바이트로 자르고 자투리를 무음으로 채웠다. 이월이
+                # 없어서 **delta 마다** 0~19ms 무음이 박혔다 — livekit 경로(세그먼트당
+                # 1회)보다 훨씬 잦다. 프레이밍은 20ms 클럭을 쥔 엔진 몫이다.
+                if not self._first_audio_logged:
+                    from ._buffering_call import log_first_realtime_audio
+
+                    log_first_realtime_audio(self._call)
+                    self._first_audio_logged = True
+                await self._call.send_audio(ulaw)
+                # barge-in 게이트용 `> 0` 플래그다 — 정확한 청크 수가 아니어도 된다.
+                self._sent_audio_chunks += 1
 
             assistant_text = "".join(text_chunks)
             if assistant_text.strip():

@@ -23,6 +23,7 @@ from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: E
 
 from clawops.agent._audio import pcm16_to_ulaw  # noqa: E402
 from clawops.agent._session import CallSession  # noqa: E402
+from clawops.agent.livekit import _io  # noqa: E402
 from clawops.agent.livekit._io import (  # noqa: E402
     FRAME_BYTES,
     SAMPLE_RATE,
@@ -129,7 +130,13 @@ async def test_output_buffers_partial_frame_until_next_capture() -> None:
     assert all(len(c) == FRAME_BYTES for c in _sent_chunks(call))
 
 
-async def test_output_pads_tail_with_silence_on_flush() -> None:
+async def test_output_sends_tail_raw_on_flush() -> None:
+    """자투리를 무음으로 채우지 않고 그대로 내보낸다.
+
+    채우면 발화 한가운데 0~19ms 구멍이 생긴다 — 이 시점의 우리는 뒤에 오디오가 더
+    오는지 모르는 채로 세그먼트를 닫기 때문이다. 그 판단은 큐를 들고 있는 엔진 몫이고,
+    엔진은 뒤따르는 mark 를 세그먼트 끝 신호로 읽어 그때 채운다.
+    """
     call = _make_call(_FakeMediaWs())
     out = ClawOpsAudioOutput(call)
 
@@ -141,8 +148,25 @@ async def test_output_pads_tail_with_silence_on_flush() -> None:
 
     chunks = _sent_chunks(call)
     assert len(chunks) == 1
+    # ⚠️ 내용으로는 판별할 수 없다 — 테스트 페이로드가 PCM 0 이라 μ-law 로도 0xff 다.
+    #    패딩 여부는 **길이**로만 갈린다.
+    assert len(chunks[0]) == 40, "자투리를 채우지 않고 그대로 내보내야 한다"
+
+
+async def test_output_pads_tail_when_killswitch_set(monkeypatch) -> None:
+    """`CLAWOPS_TAIL_PAD=1` 은 종전 동작으로 되돌린다 — 구 엔진으로 롤백할 때 쓴다."""
+    monkeypatch.setattr(_io, "_TAIL_PAD", True)
+    call = _make_call(_FakeMediaWs())
+    out = ClawOpsAudioOutput(call)
+
+    await out.capture_frame(_pcm_frame(40))
+    out.flush()
+    await asyncio.sleep(0.05)
+
+    chunks = _sent_chunks(call)
+    assert len(chunks) == 1
     assert len(chunks[0]) == FRAME_BYTES
-    assert chunks[0][40:] == b"\xff" * (FRAME_BYTES - 40)  # μ-law 무음 패딩
+    assert chunks[0][40:] == b"\xff" * (FRAME_BYTES - 40)
 
 
 # ── AudioOutput: 계약 2 (on_playback_started) ───────────────────
