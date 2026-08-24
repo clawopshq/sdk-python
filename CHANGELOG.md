@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.46.2 (2026-08-24)
+
+### Changed
+- **저장소가 [`clawopshq/sdk-python`](https://github.com/clawopshq/sdk-python) 으로 옮겨졌습니다.** 패키지 이름(`clawops`)도, API 도 그대로입니다 — 설치 명령과 코드에 바꿀 것은 없습니다. 구 주소(`learners-superpumped/clawops-python`)는 GitHub 리다이렉트로 계속 열립니다.
+- SSL 인증서 검증 실패 시 안내하던 troubleshooting 링크도 새 주소로 맞췄습니다.
+
 ## 0.46.1 (2026-08-19)
 
 ### Fixed
