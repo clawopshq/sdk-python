@@ -520,7 +520,7 @@ client = ClawOps(
 
 | 언어 | 패키지 | 저장소 |
 |------|--------|--------|
-| Node.js / TypeScript | [`@teamlearners/clawops`](https://www.npmjs.com/package/@teamlearners/clawops) | [clawops-node](https://github.com/learners-superpumped/clawops-node) |
+| Node.js / TypeScript | [`@teamlearners/clawops`](https://www.npmjs.com/package/@teamlearners/clawops) | [sdk-node](https://github.com/clawopshq/sdk-node) |
 
 ## 요구사항
 
