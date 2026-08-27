@@ -96,6 +96,12 @@ class CallSession:
         return (datetime.now() - self.start_time).total_seconds()
 
     async def send_audio(self, audio: bytes) -> None:
+        """G.711 μ-law 오디오(8kHz, mono)를 상대방에게 보낸다.
+
+        PCM16 이 아니다. 전송 계층이 μ-law gain 을 적용한 뒤 바이트를 그대로
+        흘려보내므로, PCM16 을 넣으면 μ-law 로 재해석되어 잡음이 재생된다.
+        직접 오디오를 만들어 넣을 때는 먼저 변환할 것.
+        """
         if self._send_audio_fn:
             await self._send_audio_fn(audio)
             self._metrics.record_first_response()
