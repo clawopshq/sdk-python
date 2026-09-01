@@ -266,9 +266,24 @@ class _NullInput(io.AudioInput):
 
 _FULL = "This is a very long assistant sentence that the user will barge in on halfway through."
 
+# _FULL(16단어)을 10초에 걸쳐 읽으므로 TranscriptSynchronizer 는 단어당 약 0.6초를 쓴다.
+# 끊기 전에 이만큼 재생해야 "들린 만큼"이 최소 두어 단어가 된다.
+_HEARD_BEFORE_INTERRUPT = 2.0
+
+
+async def _wait_for(predicate, *, timeout: float = 5.0) -> bool:
+    """predicate 가 참이 될 때까지 폴링한다. 벽시계 sleep 대신 쓴다."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
 
 async def _run_barge_in(*, with_sync: bool) -> str | None:
-    """say() 로 10초 분량을 재생하다 0.3초 만에 끊고, 히스토리에 남은 텍스트를 반환."""
+    """say() 로 10초 분량을 재생하다 도중에 끊고, 히스토리에 남은 텍스트를 반환."""
     call = _make_call(_FakeMediaWs(playout_delay=10.0))
     out = ClawOpsAudioOutput(call)
 
@@ -300,14 +315,24 @@ async def _run_barge_in(*, with_sync: bool) -> str | None:
             await asyncio.sleep(0)
 
     session.say(_text(), audio=_audio())
-    await asyncio.sleep(0.3)
-    await session.interrupt()
-    await asyncio.sleep(0.3)
 
-    stored = None
-    for item in session.history.items:
-        if getattr(item, "role", None) == "assistant":
-            stored = item.text_content
+    # ⚠️ 고정 sleep 으로 끊으면 안 된다. 동기화기는 재생 시작 시각을 기준으로 텍스트를
+    # 흘려보내므로, 첫 프레임이 늦게 잡히면 끊는 시점에 전달된 단어가 0개가 되고
+    # LiveKit 은 빈 assistant 메시지를 통째로 버린다(= stored is None). 실제로
+    # 스위트 전체를 돌릴 때만 그렇게 깨졌다 — 0.3초는 단어 하나의 절반이라 여유가 없다.
+    assert await _wait_for(lambda: bool(_sent_chunks(call))), "재생이 시작되지 않았다"
+    await asyncio.sleep(_HEARD_BEFORE_INTERRUPT)
+    await session.interrupt()
+
+    def _assistant() -> str | None:
+        stored = None
+        for item in session.history.items:
+            if getattr(item, "role", None) == "assistant":
+                stored = item.text_content
+        return stored
+
+    await _wait_for(lambda: _assistant() is not None)
+    stored = _assistant()
     await session.aclose()
     return stored
 

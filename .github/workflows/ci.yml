@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # dev extra 에는 livekit-agents 가 들어 있다. 빼면 LiveKit 테스트 43개가
+      # importorskip 으로 조용히 건너뛰어져 초록불인 채 검증 0 이 된다.
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -q
+
+  typecheck:
+    name: mypy (REST 표면)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e ".[dev]"
+      # ⚠️ src/clawops 전체는 strict 로 72건, tests/ 는 172건이 깨져 있다.
+      # 공개 REST 표면과 tests/typing 만 게이트로 세운다 — 여기는 지금 0건이다.
+      # 나머지를 넣으려면 먼저 그 부채를 갚아야 한다(넓히는 건 환영).
+      - run: |
+          mypy --follow-imports=silent \
+            src/clawops/resources \
+            src/clawops/types \
+            src/clawops/_exceptions.py \
+            src/clawops/_client.py \
+            tests/typing
+
+  import-py39:
+    name: import (3.9 하한)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      # pyproject 가 >=3.9 를 약속하는데 나머지 job 은 3.12 로만 돈다.
+      # pydantic 은 모델 어노테이션을 **런타임에** 평가하므로, 모델 안에 3.10+
+      # 문법(`X | None`)을 쓰면 3.9 에서 import 자체가 죽는다 — 타입체크로는
+      # 잡히지 않는다. agent extra 없이 REST 표면만 세운다.
+      - run: pip install -e .
+      - run: |
+          python -c "
+          import clawops
+          from clawops import ClawOps, AsyncClawOps
+          from clawops.pagination import SyncPage, AsyncPage
+          import clawops.types as t
+          for name in t.__all__:
+              getattr(t, name)
+          print('ok', clawops.__version__)
+          "
