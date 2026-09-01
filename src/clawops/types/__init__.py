@@ -6,6 +6,16 @@ from .blocked_recipient import (
 )
 from .call import Call, CallControlResponse
 from .call_params import CallContextParam, CallCreateParams, CallListParams, CallUpdateParams
+from .kakao import (
+    KakaoChannel,
+    KakaoChannelCategory,
+    KakaoChannelCategoryList,
+    KakaoChannelCategoryMeta,
+    KakaoChannelListStatus,
+    KakaoChannelStatus,
+    KakaoTemplate,
+    KakaoTokenRequest,
+)
 from .message import Message, MessageStatus, MessageType
 from .message_params import (
     KakaoFallbackParam,
@@ -36,9 +46,17 @@ __all__ = [
     "CallCreateParams",
     "CallListParams",
     "CallUpdateParams",
+    "KakaoChannel",
+    "KakaoChannelCategory",
+    "KakaoChannelCategoryList",
+    "KakaoChannelCategoryMeta",
+    "KakaoChannelListStatus",
+    "KakaoChannelStatus",
     "KakaoFallbackParam",
     "KakaoMessageCreateParams",
     "KakaoSendParam",
+    "KakaoTemplate",
+    "KakaoTokenRequest",
     "Message",
     "MessageStatus",
     "MessageType",

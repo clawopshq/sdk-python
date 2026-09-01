@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from .assignment_links import AssignmentLinks, AsyncAssignmentLinks
 from .blocked_recipients import AsyncBlockedRecipients, BlockedRecipients
 from .calls import AsyncCalls, Calls
+from .kakao import AsyncKakao, Kakao
 from .messages import AsyncMessages, Messages
 from .numbers import AsyncNumbers, Numbers
 from .recordings import AsyncRecordings, Recordings
@@ -35,6 +36,10 @@ class AccountContext:
     @property
     def messages(self) -> Messages:
         return Messages(client=self._client, account_id=self._account_id)
+
+    @property
+    def kakao(self) -> Kakao:
+        return Kakao(client=self._client, account_id=self._account_id)
 
     @property
     def numbers(self) -> Numbers:
@@ -71,6 +76,10 @@ class AsyncAccountContext:
     @property
     def messages(self) -> AsyncMessages:
         return AsyncMessages(client=self._client, account_id=self._account_id)
+
+    @property
+    def kakao(self) -> AsyncKakao:
+        return AsyncKakao(client=self._client, account_id=self._account_id)
 
     @property
     def numbers(self) -> AsyncNumbers:
