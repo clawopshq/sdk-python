@@ -6,7 +6,7 @@ from .blocked_recipient import (
 )
 from .call import Call, CallControlResponse
 from .call_params import CallContextParam, CallCreateParams, CallListParams, CallUpdateParams
-from .message import Message
+from .message import Message, MessageStatus, MessageType
 from .message_params import MessageCreateParams, MessageListParams
 from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
 from .number_params import NumberCreateParams, NumberUpdateParams
@@ -29,6 +29,8 @@ __all__ = [
     "CallListParams",
     "CallUpdateParams",
     "Message",
+    "MessageStatus",
+    "MessageType",
     "MessageCreateParams",
     "MessageListParams",
     "NumberCreateParams",

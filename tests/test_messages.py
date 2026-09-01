@@ -20,6 +20,16 @@ MESSAGE_JSON = {
     "dateCreated": "2025-06-01T12:00:00Z", "dateUpdated": None,
 }
 
+# 알림톡. 서버가 실제로 주는 모양이다 — type 은 'kakao' 가 아니라 'ata' 이고
+# body 에는 템플릿 변수를 치환한 결과가 담긴다.
+ATA_JSON = {
+    **MESSAGE_JSON,
+    "messageId": "MGata0123456789abcdef0123456789ab",
+    "type": "ata",
+    "status": "sent",
+    "body": "홍길동님, 주문이 접수되었습니다.",
+}
+
 
 @pytest.fixture
 def client():
@@ -108,6 +118,55 @@ class TestMessagesGet:
         assert msg.body == "안녕하세요"
 
 
+class TestAtaResponseParsing:
+    """회귀: 알림톡 응답이 SDK 를 던지게 하던 것.
+
+    서버는 알림톡을 `type: "ata"` 로 주는데 모델이 `"kakao"` 를 기다리고 있었다.
+    `"kakao"` 는 서버가 한 번도 보낸 적 없는 값이다. 그래서 콘솔로 알림톡을 한 번이라도
+    보낸 계정은 문자 조회까지 통째로 막혔다 — 목록은 페이지에 알림톡 한 건만 섞여도
+    전부 실패했다.
+    """
+
+    @respx.mock
+    def test_get_ata_does_not_raise(self, messages):
+        mid = ATA_JSON["messageId"]
+        respx.get(f"{BASE}{MESSAGES_PATH}/{mid}").mock(return_value=httpx.Response(200, json=ATA_JSON))
+        msg = messages.get(mid)
+        assert msg.type == "ata"
+        assert msg.body == "홍길동님, 주문이 접수되었습니다."
+
+    @respx.mock
+    def test_list_with_ata_mixed_in_does_not_raise(self, messages):
+        """알림톡 한 건이 섞였다고 목록 전체가 죽지 않는다.
+
+        이 경로는 특히 나빴다. 아이템 검증이 클라이언트의 try 밖(resources/messages.py)
+        에서 돌아 raw pydantic.ValidationError 가 그대로 샜다 — ClawOpsError 를 상속하지
+        않으므로 사용자의 except ClawOpsError 에도 걸리지 않았다.
+        """
+        respx.get(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(200, json={
+            "data": [MESSAGE_JSON, ATA_JSON], "meta": {"total": 2, "page": 0, "pageSize": 20},
+        }))
+        types = [m.type for m in messages.list()]
+        assert types == ["sms", "ata"]
+
+    @respx.mock
+    def test_unknown_type_does_not_raise(self, messages):
+        """서버가 유형을 새로 늘려도 던지지 않는다 — 같은 사고를 두 번 겪지 않기 위해."""
+        mid = "MGfuture00000000000000000000000000"
+        respx.get(f"{BASE}{MESSAGES_PATH}/{mid}").mock(
+            return_value=httpx.Response(200, json={**MESSAGE_JSON, "messageId": mid, "type": "rcs"})
+        )
+        assert messages.get(mid).type == "rcs"
+
+    @respx.mock
+    def test_unknown_status_does_not_raise(self, messages):
+        mid = "MGfuture00000000000000000000000001"
+        respx.get(f"{BASE}{MESSAGES_PATH}/{mid}").mock(
+            return_value=httpx.Response(200, json={**MESSAGE_JSON, "messageId": mid, "status": "pending_review"})
+        )
+        assert messages.get(mid).status == "pending_review"
+
+
 # --- Async Tests ---
 
 from clawops._base_client import AsyncAPIClient
@@ -176,3 +235,22 @@ class TestAsyncMessagesGet:
         respx.get(f"{BASE}{MESSAGES_PATH}/{mid}").mock(return_value=httpx.Response(200, json=MESSAGE_JSON))
         msg = await async_messages.get(mid)
         assert msg.message_id == mid
+
+
+class TestAsyncAtaResponseParsing:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_get_ata_does_not_raise(self, async_messages):
+        mid = ATA_JSON["messageId"]
+        respx.get(f"{BASE}{MESSAGES_PATH}/{mid}").mock(return_value=httpx.Response(200, json=ATA_JSON))
+        msg = await async_messages.get(mid)
+        assert msg.type == "ata"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_list_with_ata_mixed_in_does_not_raise(self, async_messages):
+        respx.get(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(200, json={
+            "data": [MESSAGE_JSON, ATA_JSON], "meta": {"total": 2, "page": 0, "pageSize": 20},
+        }))
+        page = await async_messages.list()
+        assert [m.type for m in page] == ["sms", "ata"]
