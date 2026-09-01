@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.47.0 (2026-09-02)
+
+### Fixed
+- **🔥 알림톡을 조회하면 SDK 가 예외를 던지던 것.** 서버는 카카오 알림톡을 `type: "ata"` 로 주는데 모델이 `"kakao"` 를 기다리고 있었습니다 — `"kakao"` 는 **서버가 한 번도 보낸 적 없는 값**입니다.
+  - `messages.get()` 은 `APIResponseValidationError`, `messages.list()` 는 **raw `pydantic.ValidationError`** 를 던졌습니다. 후자는 `ClawOpsError` 를 상속하지 않아 `except ClawOpsError` 로도 잡히지 않았습니다.
+  - 목록은 **페이지에 알림톡이 한 건만 섞여도 전체가 실패**했습니다. 즉 콘솔로 알림톡을 한 번이라도 보낸 계정은 문자 조회까지 막혔습니다.
+  - 고치는 김에 `Message.type` · `Message.status` 의 닫힌 `Literal` 을 걷어냈습니다. 이 어휘는 서버가 소유하므로 값이 하나 늘 때마다 같은 사고가 반복됩니다. 이제 모르는 값도 그대로 통과합니다(타입체커에겐 `str`, IDE 자동완성은 유지).
+
+### Added
+- **카카오 알림톡 발송.** `messages.create()` 가 `kakao` · `fallback` 을 받습니다.
+  ```python
+  client.messages.create(
+      to="01012345678", from_="07052358010",
+      kakao={"channel_id": "clx9kak0001", "template_id": "clx9tpl0001",
+             "variables": {"고객명": "홍길동"}},
+      fallback={"body": "주문이 접수되었습니다."},
+  )
+  ```
+  - 문자와 알림톡은 **오버로드 두 개**로 갈립니다. `body=` 와 `kakao=` 를 같이 주면 타입 에러이고, 타입체커를 쓰지 않아도 요청 전에 `TypeError` 로 거절합니다(서버 400 을 기다리지 않습니다).
+  - `fallback` 은 **별도 메시지 1건**으로 문자 단가가 따로 청구됩니다. 생략하면 템플릿 본문을 그대로 문자로 보냅니다.
+- **`client.kakao.*` — 채널·템플릿 리소스 7종.** 발송에 필요한 ID 를 콘솔에서 손으로 옮겨 적지 않아도 됩니다.
+  ```python
+  channels = client.kakao.channels.list(status="connected")
+  templates = client.kakao.templates.list(channel_id=channels.data[0].id)
+  template = next(t for t in templates if t.sendable)
+  ```
+  `channels.list/retrieve/request_token/connect/disconnect`, `templates.list`, `channel_categories()`. sync·async 와 `client.accounts("AC…").kakao` 모두 지원합니다.
+  - ⚠️ `connect` 는 멱등이지만 **타임아웃 시 재호출하지 마세요** — 이미 연결됐을 수 있습니다. `retrieve()` 로 확인하세요.
+  - ⚠️ 연결에 실패해도 **인증번호는 소모됩니다.** 다만 `429`/`503` 은 시도되지 않은 것이라 인증번호가 유효합니다.
+  - ⚠️ `disconnect` 는 되돌릴 수 없고 **그 채널의 알림톡 템플릿까지 함께 삭제**됩니다.
+- **`err.code` — 실패 사유 분기.** 서버가 주던 `{error, code}` 의 `code` 를 SDK 가 읽지 않아 **한글 메시지를 문자열 비교**해야 했습니다. 같은 상태 코드에 사유가 몰립니다(422 만 해도 수신거부·할당량 초과·템플릿 미승인).
+  ```python
+  except BadRequestError as e:
+      if e.code == "kakao_variable_missing": ...
+  ```
+- **메시지 목록에 `number` 필터와 `type="ata"`.** 둘 다 서버에는 있는데 SDK 에 없던 것입니다.
+
+### Changed
+- `MessageCreateParams` 가 클래스에서 `TextMessageCreateParams | KakaoMessageCreateParams` 유니온 별칭이 됐습니다. `import` 는 그대로지만 `MessageCreateParams(...)` 생성자 용법은 깨집니다.
+- `messages.list(status="sending")` 이 타입 에러가 됩니다. 서버 쿼리 검증이 `queued|sent|failed|received` 만 받아 **400 을 내던 조합이라 동작한 적이 없습니다.** 응답의 `status` 에는 그대로 나올 수 있습니다.
+- **PR CI 를 세웠습니다** — pytest · mypy(REST 표면) · 3.9 import. 이 레포에는 PR 에서 도는 검사가 하나도 없었고, `[tool.mypy] strict = true` 는 실행된 적이 없었습니다.
+
+### Fixed (internal)
+- 전체 스위트에서 100% 실패하던 `test_barge_in_truncates_history` 를 고쳤습니다. 오염이 아니라 타이밍이었습니다 — 끊기 전 대기가 0.3초, 단어 하나의 절반이라 전달된 단어가 0이냐 1이냐가 스케줄러에 좌우됐습니다. **이 실패가 publish 게이트를 막고 있었습니다.**
+
 ## 0.46.2 (2026-08-24)
 
 ### Changed

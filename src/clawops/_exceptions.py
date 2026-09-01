@@ -1,8 +1,65 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, Optional, Union
 
 import httpx
+
+# 서버는 실패 응답을 `{"error": "...", "code": "..."}` 로 준다. code 없이 읽으면
+# 수신거부(422 recipient_blocked)와 할당량 초과(422 quota_exceeded)를 **한글 메시지로**
+# 구분해야 한다.
+#
+# ⚠️ 서버가 도메인마다 표기를 달리 쓴다 — 문자 도메인은 snake_case, 채널 도메인은
+# SCREAMING_CASE 다. SDK 가 임의로 정규화하면 실제 응답과 어긋나므로 **섞인 채로** 옮긴다.
+# 열린 유니온이라 여기 없는 코드도 그대로 들어온다(자동완성만 돕는다).
+ClawOpsErrorCode = Union[
+    Literal[
+        # ── 문자·알림톡 발송 (services/messages.ts · kakao-send.ts) ──
+        "kakao_required",
+        "kakao_type_conflict",
+        "kakao_body_not_allowed",
+        "kakao_subject_not_allowed",
+        "kakao_media_not_allowed",
+        "kakao_unavailable",
+        "kakao_send_failed",
+        "kakao_variable_missing",
+        "kakao_variable_unknown",
+        "kakao_channel_not_found",
+        "kakao_template_not_found",
+        "kakao_template_not_approved",
+        "kakao_template_dormant",
+        "body_too_long",
+        "invalid_phone",
+        "invalid_input",
+        "from_not_registered",
+        "sms_no_media",
+        "sms_no_subject",
+        "media_download_failed",
+        "recipient_blocked",
+        "messaging_blocked",
+        "quota_exceeded",
+        "override_quota_exceeded",
+        "no_active_subscription",
+        "not_found",
+        # ── 카카오 채널 연동 (services/kakao-channels.ts) ──
+        "KAKAO_TOKEN_INVALID",
+        "KAKAO_CHANNEL_ALREADY_LINKED",
+        "KAKAO_CHANNEL_REJECTED",
+        "KAKAO_RATE_LIMITED",
+        "KAKAO_PROVIDER_UNAVAILABLE",
+        "VALIDATION",
+    ],
+    str,
+]
+"""실패 응답의 ``code``. 사유를 한글 문구가 아니라 값으로 분기하기 위한 것이다."""
+
+
+def _extract_error_code(body: Any) -> Optional[ClawOpsErrorCode]:
+    """응답 body 에서 ``code`` 를 꺼낸다. 없거나 문자열이 아니면 None."""
+    if isinstance(body, dict):
+        code = body.get("code")
+        if isinstance(code, str) and code:
+            return code
+    return None
 
 
 class ClawOpsError(Exception):
@@ -27,6 +84,18 @@ class APIStatusError(APIError):
     status_code: int
     response: httpx.Response
     body: Any | None
+    code: ClawOpsErrorCode | None
+    """실패 사유 코드. 서버가 주지 않았으면 ``None``.
+
+    같은 상태 코드에 여러 사유가 몰리므로(422 만 해도 수신거부·할당량 초과·템플릿
+    미승인이 섞인다) 분기는 이 값으로 합니다. 한글 메시지는 문구가 바뀝니다.
+
+        try:
+            client.messages.create(..., kakao={...})
+        except BadRequestError as e:
+            if e.code == "kakao_variable_missing":
+                ...
+    """
 
     def __init__(
         self,
@@ -39,6 +108,7 @@ class APIStatusError(APIError):
         self.status_code = response.status_code
         self.response = response
         self.body = body
+        self.code = _extract_error_code(body)
 
 
 class BadRequestError(APIStatusError):

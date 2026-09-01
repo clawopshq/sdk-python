@@ -375,6 +375,10 @@ message = client.messages.create(
 
 # 메시지 목록 조회 (필터링)
 page = client.messages.list(type="sms", status="sent", page=0, page_size=20)
+
+# 번호로 필터 (하이픈 유무를 모두 매칭), 알림톡만 골라 보기
+page = client.messages.list(number="07052358010")
+page = client.messages.list(type="ata")
 for msg in page:
     print(msg.message_id, msg.status)
 
@@ -384,6 +388,70 @@ for msg in client.messages.list().auto_paging_iter():
 
 # 특정 메시지 조회
 msg = client.messages.get("MG0123456789abcdef")
+```
+
+### 카카오 알림톡 (Kakao)
+
+알림톡은 **검수된 템플릿**으로만 나갑니다. 본문을 요청으로 쓰는 게 아니라, 승인된 템플릿에 변수를 채워 보냅니다.
+
+```python
+# 1. 연결된 채널 찾기
+channels = client.kakao.channels.list(status="connected")
+channel = channels.data[0]
+
+# 2. 그 채널의 템플릿 중 발송 가능한 것 고르기
+#    ⚠️ status("APPROVED")가 아니라 sendable 이 정본입니다 — 휴면 여부까지 반영된 값입니다.
+templates = client.kakao.templates.list(channel_id=channel.id)
+template = next(t for t in templates if t.sendable)
+print(template.variables)      # ['#{고객명}'] — 이 목록을 전부 채워야 합니다
+
+# 3. 발송
+msg = client.messages.create(
+    to="01012345678",
+    from_="07052358010",
+    kakao={
+        "channel_id": channel.id,
+        "template_id": template.id,
+        "variables": {"고객명": "홍길동"},   # '고객명' 과 '#{고객명}' 둘 다 받습니다
+    },
+    fallback={"body": "주문이 접수되었습니다."},
+)
+print(msg.type, msg.body)      # ata 홍길동님, 주문이 접수되었습니다.
+```
+
+- **`body` 와 `kakao` 는 섞을 수 없습니다.** `create()` 가 오버로드로 갈려 있어 타입 단계에서 걸리고, 타입체커를 쓰지 않아도 요청을 보내기 전에 `TypeError` 로 거절합니다.
+- **버튼·아이템 리스트·강조 문구는 템플릿에 검수된 대로** 나갑니다. 요청으로 바꿀 수 없고, 응답 `body` 에도 담기지 않습니다.
+- **`fallback` 은 별도 메시지 1건입니다.** 알림톡이 실패하면(수신자가 카카오톡을 쓰지 않는 등) 이 문구가 문자로 나가고 **문자 단가로 따로 청구**됩니다. 생략하면 템플릿 본문을 그대로 문자로 보냅니다. 아예 보내지 않으려면 `fallback={"disabled": True}`.
+
+#### 채널 연결
+
+두 단계입니다. 서버는 그 사이 상태를 저장하지 않으므로(미완료 담당자 번호를 남기지 않기 위해) `search_id` 와 `phone_number` 를 두 번 모두 보냅니다.
+
+```python
+# 업종 카테고리는 열린 집합입니다 — 하드코딩하지 말고 이 응답을 선택지로 쓰세요.
+categories = client.kakao.channel_categories()
+
+# ① 담당자 휴대전화로 인증번호 발송 (응답에 인증번호는 없습니다 — 202)
+req = client.kakao.channels.request_token(search_id="example", phone_number="010-1234-5678")
+print(req.phone_number_masked, req.retry_after_seconds)
+
+# ② 받은 인증번호로 연결 완료
+channel = client.kakao.channels.connect(
+    search_id=req.search_id,
+    phone_number="010-1234-5678",
+    category_code=categories.data[0].code,
+    token="394812",
+)
+```
+
+- **`connect` 는 멱등이지만, 타임아웃되면 다시 보내지 마세요.** 이미 연결에 성공했을 수 있습니다. `client.kakao.channels.retrieve(channel_id)` 로 확인하세요 — 이 조회는 몇 번을 불러도 안전합니다.
+- **연결에 실패해도 인증번호는 소모됩니다** (`KAKAO_TOKEN_INVALID`·`KAKAO_CHANNEL_REJECTED` 둘 다). 원인을 해결한 뒤 새로 요청해야 합니다. 다만 `429`/`503` 은 연결이 **시도되지 않았다**는 뜻이라 인증번호가 아직 유효합니다.
+- **`list()` 는 카카오 쪽 상태를 확인하지 않습니다.** 저장된 연결 정보를 그대로 돌려주므로 빠릅니다. 실제 상태 확인은 `retrieve()` 뿐이고, 그 호출이 `status` 를 갱신합니다.
+
+```python
+# 연결 해제 — ⚠️ 되돌릴 수 없고, 그 채널의 알림톡 템플릿도 함께 삭제됩니다.
+#              템플릿은 카카오 검수를 다시 받아야 하므로 복구에 시간이 걸립니다.
+client.kakao.channels.disconnect(channel.id)
 ```
 
 ### 멀티 계정 접근
@@ -451,7 +519,30 @@ except NotFoundError as e:
     print(f"리소스를 찾을 수 없음: {e.status_code}")
 ```
 
-모든 에러는 `ClawOpsError`를 상속합니다. HTTP 에러는 `status_code`, `response`, `body`, `request` 속성을 제공합니다.
+모든 에러는 `ClawOpsError`를 상속합니다. HTTP 에러는 `status_code`, `code`, `response`, `body`, `request` 속성을 제공합니다.
+
+#### 사유는 `code` 로 분기하세요
+
+같은 상태 코드에 여러 사유가 몰립니다 — `422` 만 해도 수신거부·할당량 초과·템플릿 미승인이 섞입니다. 메시지 문구는 바뀌지만 `code` 는 계약입니다.
+
+```python
+from clawops import BadRequestError, UnprocessableEntityError
+
+try:
+    client.messages.create(to=..., from_=..., kakao={...})
+except BadRequestError as e:
+    if e.code == "kakao_variable_missing":
+        ...   # 템플릿이 요구하는 변수를 덜 채웠다
+    elif e.code == "kakao_variable_unknown":
+        ...   # 템플릿에 없는 변수를 보냈다
+except UnprocessableEntityError as e:
+    if e.code == "recipient_blocked":
+        ...   # 수신거부 명단에 있다 (발송 자체가 일어나지 않아 이력에도 남지 않는다)
+    elif e.code == "quota_exceeded":
+        ...
+```
+
+⚠️ 서버가 도메인마다 표기를 달리 씁니다 — 문자 도메인은 `snake_case`(`kakao_variable_missing`), 채널 연동은 `SCREAMING_CASE`(`KAKAO_TOKEN_INVALID`)입니다. SDK 는 실제 응답과 어긋나지 않도록 **섞인 채로** 노출합니다. 서버가 코드를 새로 만들어도 그대로 실립니다.
 
 | 에러                       | 상태 코드 |
 | -------------------------- | --------- |
