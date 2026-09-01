@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from .._models import BaseModel
 
@@ -29,7 +29,7 @@ class WebhookLog(BaseModel):
     webhook_id: str
     event: str
     request_url: str
-    request_payload: dict
+    request_payload: dict[str, Any]
     response_status: Optional[int] = None
     response_body: Optional[str] = None
     response_time_ms: Optional[int] = None
