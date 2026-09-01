@@ -9,6 +9,7 @@ from ._constants import DEFAULT_BASE_URL, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
 from ._exceptions import ClawOpsError
 from .resources.accounts import AccountContext, AsyncAccountContext
 from .resources.calls import AsyncCalls, Calls
+from .resources.kakao import AsyncKakao, Kakao
 from .resources.messages import AsyncMessages, Messages
 from .resources.numbers import AsyncNumbers, Numbers
 from .resources.recordings import AsyncRecordings, Recordings
@@ -111,6 +112,14 @@ class ClawOps(SyncAPIClient):
         return Messages(client=self, account_id=self._default_account_id)
 
     @property
+    def kakao(self) -> Kakao:
+        """카카오 알림톡 리소스(채널·템플릿·카테고리)에 접근합니다.
+
+        발송 자체는 ``client.messages.create(..., kakao={...})`` 입니다.
+        """
+        return Kakao(client=self, account_id=self._default_account_id)
+
+    @property
     def webhook_logs(self) -> WebhookLogs:
         """Webhook 발송 로그 리소스에 접근합니다."""
         return WebhookLogs(client=self, account_id=self._default_account_id)
@@ -210,6 +219,11 @@ class AsyncClawOps(AsyncAPIClient):
     @property
     def messages(self) -> AsyncMessages:
         return AsyncMessages(client=self, account_id=self._default_account_id)
+
+    @property
+    def kakao(self) -> AsyncKakao:
+        """카카오 알림톡 리소스(채널·템플릿·카테고리)에 접근합니다."""
+        return AsyncKakao(client=self, account_id=self._default_account_id)
 
     @property
     def webhook_logs(self) -> AsyncWebhookLogs:
