@@ -6,8 +6,16 @@ from .blocked_recipient import (
 )
 from .call import Call, CallControlResponse
 from .call_params import CallContextParam, CallCreateParams, CallListParams, CallUpdateParams
-from .message import Message
-from .message_params import MessageCreateParams, MessageListParams
+from .message import Message, MessageStatus, MessageType
+from .message_params import (
+    KakaoFallbackParam,
+    KakaoMessageCreateParams,
+    KakaoSendParam,
+    MessageCreateParams,
+    MessageListParams,
+    TextMessageCreateParams,
+    TextMessageType,
+)
 from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
 from .number_params import NumberCreateParams, NumberUpdateParams
 from .recording import RecordingDownload
@@ -28,7 +36,12 @@ __all__ = [
     "CallCreateParams",
     "CallListParams",
     "CallUpdateParams",
+    "KakaoFallbackParam",
+    "KakaoMessageCreateParams",
+    "KakaoSendParam",
     "Message",
+    "MessageStatus",
+    "MessageType",
     "MessageCreateParams",
     "MessageListParams",
     "NumberCreateParams",
@@ -42,6 +55,8 @@ __all__ = [
     "SipCredential",
     "SipEndpoint",
     "SummaryStatus",
+    "TextMessageCreateParams",
+    "TextMessageType",
     "TranscriptRequestAccepted",
     "TranscriptSegment",
     "TranscriptStatus",
