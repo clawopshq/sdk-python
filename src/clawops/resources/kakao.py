@@ -208,15 +208,10 @@ class KakaoChannels(SyncAPIResource):
         timeout: float | None = None,
     ) -> SyncPage[KakaoChannel]:
         query = _channel_list_query(status=status, page=page, page_size=page_size)
-        result = self._client._get(
-            self._path, cast_to=SyncPage[KakaoChannel], query=query if query else None,
+        return self._client._get_page(
+            self._path, cast_to=KakaoChannel, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [
-            KakaoChannel.model_validate(item) if isinstance(item, dict) else item for item in result.data
-        ]
-        result._set_client(client=self._client, path=self._path, cast_to=KakaoChannel, query=query)
-        return result
 
     list.__doc__ = _LIST_DOC
 
@@ -310,15 +305,10 @@ class KakaoTemplates(SyncAPIResource):
         timeout: float | None = None,
     ) -> SyncPage[KakaoTemplate]:
         query = _template_list_query(channel_id=channel_id, page=page, page_size=page_size)
-        result = self._client._get(
-            self._path, cast_to=SyncPage[KakaoTemplate], query=query,
+        return self._client._get_page(
+            self._path, cast_to=KakaoTemplate, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [
-            KakaoTemplate.model_validate(item) if isinstance(item, dict) else item for item in result.data
-        ]
-        result._set_client(client=self._client, path=self._path, cast_to=KakaoTemplate, query=query)
-        return result
 
     list.__doc__ = _TEMPLATES_LIST_DOC
 
@@ -367,15 +357,10 @@ class AsyncKakaoChannels(AsyncAPIResource):
         timeout: float | None = None,
     ) -> AsyncPage[KakaoChannel]:
         query = _channel_list_query(status=status, page=page, page_size=page_size)
-        result = await self._client._get(
-            self._path, cast_to=AsyncPage[KakaoChannel], query=query if query else None,
+        return await self._client._get_page(
+            self._path, cast_to=KakaoChannel, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [
-            KakaoChannel.model_validate(item) if isinstance(item, dict) else item for item in result.data
-        ]
-        result._set_client(client=self._client, path=self._path, cast_to=KakaoChannel, query=query)
-        return result
 
     list.__doc__ = _LIST_DOC
 
@@ -469,15 +454,10 @@ class AsyncKakaoTemplates(AsyncAPIResource):
         timeout: float | None = None,
     ) -> AsyncPage[KakaoTemplate]:
         query = _template_list_query(channel_id=channel_id, page=page, page_size=page_size)
-        result = await self._client._get(
-            self._path, cast_to=AsyncPage[KakaoTemplate], query=query,
+        return await self._client._get_page(
+            self._path, cast_to=KakaoTemplate, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [
-            KakaoTemplate.model_validate(item) if isinstance(item, dict) else item for item in result.data
-        ]
-        result._set_client(client=self._client, path=self._path, cast_to=KakaoTemplate, query=query)
-        return result
 
     list.__doc__ = _TEMPLATES_LIST_DOC
 

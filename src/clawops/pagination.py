@@ -37,12 +37,14 @@ class SyncPage(BaseModel, Generic[_T]):
             raise RuntimeError("Page client is not set")
         if not self.has_next_page():
             raise StopIteration("No more pages")
+        if self._cast_to is None:
+            raise RuntimeError("Page cast_to is not set")
         next_query = self._query.copy()
         next_query["page"] = self.meta.page + 1
-        result = self._client._get(self._path, cast_to=SyncPage[self._cast_to], query=next_query)
+        # 아이템 검증은 클라이언트 안에서 돈다 — 뒷장에서 raw pydantic 예외가 새면
+        # auto_paging_iter() 중간에 ClawOpsError 밖의 예외로 순회가 끊긴다.
+        result = self._client._get_page(self._path, cast_to=self._cast_to, query=next_query)
         result._set_client(client=self._client, path=self._path, cast_to=self._cast_to, query=self._query)
-        if self._cast_to is not None:
-            result.data = [self._cast_to.model_validate(item) if isinstance(item, dict) else item for item in result.data]
         return result
 
     def __iter__(self) -> Iterator[_T]:
@@ -82,12 +84,12 @@ class AsyncPage(BaseModel, Generic[_T]):
             raise RuntimeError("Page client is not set")
         if not self.has_next_page():
             raise StopAsyncIteration("No more pages")
+        if self._cast_to is None:
+            raise RuntimeError("Page cast_to is not set")
         next_query = self._query.copy()
         next_query["page"] = self.meta.page + 1
-        result = await self._client._get(self._path, cast_to=AsyncPage[self._cast_to], query=next_query)
+        result = await self._client._get_page(self._path, cast_to=self._cast_to, query=next_query)
         result._set_client(client=self._client, path=self._path, cast_to=self._cast_to, query=self._query)
-        if self._cast_to is not None:
-            result.data = [self._cast_to.model_validate(item) if isinstance(item, dict) else item for item in result.data]
         return result
 
     def __iter__(self) -> Iterator[_T]:

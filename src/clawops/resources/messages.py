@@ -214,13 +214,10 @@ class Messages(SyncAPIResource):
             type=type, status=status, number=number, page=page, page_size=page_size
         )
         path = f"{self._base_path}/messages"
-        result = self._client._get(
-            path, cast_to=SyncPage[Message], query=query if query else None,
+        return self._client._get_page(
+            path, cast_to=Message, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [Message.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=Message, query=query)
-        return result
 
     list.__doc__ = _LIST_DOC
 
@@ -323,13 +320,10 @@ class AsyncMessages(AsyncAPIResource):
             type=type, status=status, number=number, page=page, page_size=page_size
         )
         path = f"{self._base_path}/messages"
-        result = await self._client._get(
-            path, cast_to=AsyncPage[Message], query=query if query else None,
+        return await self._client._get_page(
+            path, cast_to=Message, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [Message.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=Message, query=query)
-        return result
 
     list.__doc__ = _LIST_DOC
 
