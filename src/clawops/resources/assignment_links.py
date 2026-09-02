@@ -64,20 +64,14 @@ class AssignmentLinks(SyncAPIResource):
         """발급 링크 목록을 조회합니다. ``auto_paging_iter()``로 전체 순회 가능."""
         query = strip_not_given({"status": status, "page": page, "pageSize": page_size})
         path = f"{self._base_path}/assignment-links"
-        result = self._client._get(
+        return self._client._get_page(
             path,
-            cast_to=SyncPage[AssignmentLink],
-            query=query if query else None,
+            cast_to=AssignmentLink,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [
-            AssignmentLink.model_validate(item) if isinstance(item, dict) else item
-            for item in result.data
-        ]
-        result._set_client(client=self._client, path=path, cast_to=AssignmentLink, query=query)
-        return result
 
     def retrieve(
         self,
@@ -156,20 +150,14 @@ class AsyncAssignmentLinks(AsyncAPIResource):
     ) -> AsyncPage[AssignmentLink]:
         query = strip_not_given({"status": status, "page": page, "pageSize": page_size})
         path = f"{self._base_path}/assignment-links"
-        result = await self._client._get(
+        return await self._client._get_page(
             path,
-            cast_to=AsyncPage[AssignmentLink],
-            query=query if query else None,
+            cast_to=AssignmentLink,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [
-            AssignmentLink.model_validate(item) if isinstance(item, dict) else item
-            for item in result.data
-        ]
-        result._set_client(client=self._client, path=path, cast_to=AssignmentLink, query=query)
-        return result
 
     async def retrieve(
         self,

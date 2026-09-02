@@ -7,6 +7,9 @@
   - `messages.get()` 은 `APIResponseValidationError`, `messages.list()` 는 **raw `pydantic.ValidationError`** 를 던졌습니다. 후자는 `ClawOpsError` 를 상속하지 않아 `except ClawOpsError` 로도 잡히지 않았습니다.
   - 목록은 **페이지에 알림톡이 한 건만 섞여도 전체가 실패**했습니다. 즉 콘솔로 알림톡을 한 번이라도 보낸 계정은 문자 조회까지 막혔습니다.
   - 고치는 김에 `Message.type` · `Message.status` 의 닫힌 `Literal` 을 걷어냈습니다. 이 어휘는 서버가 소유하므로 값이 하나 늘 때마다 같은 사고가 반복됩니다. 이제 모르는 값도 그대로 통과합니다(타입체커에겐 `str`, IDE 자동완성은 유지).
+- **같은 사고가 남아 있던 목록 전부.** `messages.list()` 만 그랬던 게 아닙니다 — 페이지를 돌려주는 목록 **7종 × sync/async 14곳**이 아이템 검증을 클라이언트의 `try` **밖**에서 돌려 raw `pydantic.ValidationError` 가 그대로 샜습니다. 이제 페이지 봉투와 아이템을 한 곳에서 검증해 전부 `APIResponseValidationError`(= `ClawOpsError`) 로 나옵니다.
+  - `auto_paging_iter()` 의 **뒷장**도 같은 경로였습니다. 첫 장만 고치면 순회 도중 SDK 밖의 예외로 끊겨 이미 받아 둔 앞장까지 같이 날아갑니다.
+  - 대상: `calls` · `messages` · `kakao.channels` · `kakao.templates` · `assignment_links` · `blocked_recipients` · `webhook_logs`. `numbers` · `sip_credentials` · `sip_endpoints` 는 봉투 모델을 써서 원래 안전했습니다.
 
 ### Added
 - **카카오 알림톡 발송.** `messages.create()` 가 `kakao` · `fallback` 을 받습니다.

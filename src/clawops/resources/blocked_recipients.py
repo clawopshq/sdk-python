@@ -98,20 +98,14 @@ class BlockedRecipients(SyncAPIResource):
             }
         )
         path = f"{self._base_path}/blocked-recipients"
-        result = self._client._get(
+        return self._client._get_page(
             path,
-            cast_to=SyncPage[BlockedRecipient],
-            query=query if query else None,
+            cast_to=BlockedRecipient,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [
-            BlockedRecipient.model_validate(item) if isinstance(item, dict) else item
-            for item in result.data
-        ]
-        result._set_client(client=self._client, path=path, cast_to=BlockedRecipient, query=query)
-        return result
 
     def retrieve(
         self,
@@ -240,20 +234,14 @@ class AsyncBlockedRecipients(AsyncAPIResource):
             }
         )
         path = f"{self._base_path}/blocked-recipients"
-        result = await self._client._get(
+        return await self._client._get_page(
             path,
-            cast_to=AsyncPage[BlockedRecipient],
-            query=query if query else None,
+            cast_to=BlockedRecipient,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [
-            BlockedRecipient.model_validate(item) if isinstance(item, dict) else item
-            for item in result.data
-        ]
-        result._set_client(client=self._client, path=path, cast_to=BlockedRecipient, query=query)
-        return result
 
     async def retrieve(
         self,

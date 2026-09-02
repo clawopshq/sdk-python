@@ -161,17 +161,14 @@ class Calls(SyncAPIResource):
             {"status": status, "from": from_, "to": to, "number": number, "page": page, "pageSize": page_size}
         )
         path = f"{self._base_path}/calls"
-        result = self._client._get(
+        return self._client._get_page(
             path,
-            cast_to=SyncPage[Call],
-            query=query if query else None,
+            cast_to=Call,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [Call.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=Call, query=query)
-        return result
 
     def get(
         self,
@@ -403,17 +400,14 @@ class AsyncCalls(AsyncAPIResource):
             {"status": status, "from": from_, "to": to, "number": number, "page": page, "pageSize": page_size}
         )
         path = f"{self._base_path}/calls"
-        result = await self._client._get(
+        return await self._client._get_page(
             path,
-            cast_to=AsyncPage[Call],
-            query=query if query else None,
+            cast_to=Call,
+            query=query,
             extra_headers=extra_headers,
             extra_query=extra_query,
             timeout=timeout,
         )
-        result.data = [Call.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=Call, query=query)
-        return result
 
     async def get(
         self,

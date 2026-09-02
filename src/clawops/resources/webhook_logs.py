@@ -36,13 +36,10 @@ class WebhookLogs(SyncAPIResource):
         """
         query = strip_not_given({"page": page, "pageSize": page_size})
         path = f"{self._base_path}/webhooks/{webhook_id}/logs"
-        result = self._client._get(
-            path, cast_to=SyncPage[WebhookLog], query=query if query else None,
+        return self._client._get_page(
+            path, cast_to=WebhookLog, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [WebhookLog.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=WebhookLog, query=query)
-        return result
 
 
 class AsyncWebhookLogs(AsyncAPIResource):
@@ -61,10 +58,7 @@ class AsyncWebhookLogs(AsyncAPIResource):
         """Webhook 발송 로그를 비동기로 조회합니다."""
         query = strip_not_given({"page": page, "pageSize": page_size})
         path = f"{self._base_path}/webhooks/{webhook_id}/logs"
-        result = await self._client._get(
-            path, cast_to=AsyncPage[WebhookLog], query=query if query else None,
+        return await self._client._get_page(
+            path, cast_to=WebhookLog, query=query,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
-        result.data = [WebhookLog.model_validate(item) if isinstance(item, dict) else item for item in result.data]
-        result._set_client(client=self._client, path=path, cast_to=WebhookLog, query=query)
-        return result
