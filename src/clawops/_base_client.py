@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from random import random
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -23,6 +23,9 @@ from ._exceptions import (
     _make_status_error,
 )
 from ._version import __version__
+
+if TYPE_CHECKING:
+    from .pagination import AsyncPage, SyncPage
 
 _T = TypeVar("_T", bound=pydantic.BaseModel)
 
@@ -232,6 +235,38 @@ class SyncAPIClient:
         assert result is not None
         return result
 
+    def _get_page(
+        self,
+        path: str,
+        *,
+        cast_to: type[_T],
+        query: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> SyncPage[_T]:
+        """목록 endpoint 전용 GET — 페이지 봉투와 **아이템 한 건 한 건**을 같은 try 안에서 검증한다.
+
+        ⛔ 아이템 검증을 호출부에 두면 raw ``pydantic.ValidationError`` 가 그대로 새어 나가
+        ``except ClawOpsError`` 로 잡히지 않는다. 서버가 어휘를 하나 늘리는 순간 목록 전체가
+        **SDK 예외 계층 밖의 예외**로 죽는다. 페이지네이션 뒷장도 같은 경로를 탄다.
+        """
+        from .pagination import SyncPage
+
+        response = self._send(
+            "GET", path, query=query if query else None,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+        try:
+            page = SyncPage[cast_to].model_validate(response.json())  # type: ignore[valid-type]
+            page.data = [
+                cast_to.model_validate(item) if isinstance(item, dict) else item for item in page.data
+            ]
+        except pydantic.ValidationError as e:
+            raise APIResponseValidationError(response=response) from e
+        page._set_client(client=self, path=path, cast_to=cast_to, query=query or {})
+        return cast("SyncPage[_T]", page)
+
     def _get_raw(
         self,
         path: str,
@@ -433,6 +468,33 @@ class AsyncAPIClient:
                                      extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
         assert result is not None
         return result
+
+    async def _get_page(
+        self,
+        path: str,
+        *,
+        cast_to: type[_T],
+        query: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> AsyncPage[_T]:
+        """:meth:`SyncAPIClient._get_page` 의 async 버전."""
+        from .pagination import AsyncPage
+
+        response = await self._send(
+            "GET", path, query=query if query else None,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+        try:
+            page = AsyncPage[cast_to].model_validate(response.json())  # type: ignore[valid-type]
+            page.data = [
+                cast_to.model_validate(item) if isinstance(item, dict) else item for item in page.data
+            ]
+        except pydantic.ValidationError as e:
+            raise APIResponseValidationError(response=response) from e
+        page._set_client(client=self, path=path, cast_to=cast_to, query=query or {})
+        return cast("AsyncPage[_T]", page)
 
     async def _get_raw(
         self,
