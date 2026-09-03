@@ -11,7 +11,7 @@ import logging
 from typing import Any, Literal
 
 from .._builtin_tools import BuiltinTool
-from .._session import CallSession
+from .._session import CallSession, DtmfCollectorBusy
 
 log = logging.getLogger("clawops.agent")
 
@@ -211,6 +211,9 @@ async def execute_builtin_tool(
                 timeout=args.get("timeout", 5),
             )
             return result if result else "(타임아웃 - 입력 없음)"
+        except DtmfCollectorBusy:
+            # 중복 호출은 고장이 아니다 — _toolset.py 의 같은 자리에 이유를 적어 뒀다.
+            return "(이미 입력을 받는 중입니다. 결과를 기다리세요.)"
         except Exception as e:
             return f"Error: {e}"
     if func_name == "send_dtmf":

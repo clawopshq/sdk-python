@@ -13,6 +13,19 @@ from clawops.agent._telemetry import CallMetrics
 log = logging.getLogger("clawops.agent")
 
 
+class DtmfCollectorBusy(RuntimeError):
+    """``collect_dtmf`` 가 이미 돌고 있는데 또 불렸다.
+
+    실시간 모델은 도구를 **중복으로 호출한다** — 앞 호출이 아직 자리를 기다리는 동안 같은
+    도구를 한 번 더 낸다(2026-09-03 실통화에서 관측). 이걸 맨 ``RuntimeError`` 로 던지면
+    도구 래퍼가 ``"Error: ..."`` 로 감싸 모델에게 돌려주고, 모델은 뭔가 고장난 줄 알고
+    **그 뒤로 도구를 다시 부르지 않는다.** 그러면 발신자가 누르는 키는 아무도 받지 않는다.
+
+    ``RuntimeError`` 를 상속하므로 기존에 이걸 잡던 코드는 그대로 돈다. 도구 경로만
+    이 타입을 따로 잡아 "고장"이 아니라 "기다리라"는 뜻으로 옮긴다.
+    """
+
+
 class CallSession:
     def __init__(
         self,
@@ -159,19 +172,43 @@ class CallSession:
         finish_on_key: str = "#",
         timeout: float = 5,
         secure: bool = False,
+        max_wait: float | None = 30,
     ) -> str:
-        """DTMF 입력을 수집한다."""
+        """DTMF 입력을 수집한다.
+
+        ``timeout`` 은 **자리 사이** 대기다(inter-digit). ``<Gather>`` 를 비롯한 IVR 관행과
+        같은 의미이고, 자리가 들어올 때마다 다시 시작한다.
+
+        ``max_wait`` 는 그 관행이 만드는 최악을 막는 **전체 상한**이다. 자리마다 리셋되는
+        타이머만 있으면 수집 하나가 최대 ``max_digits × timeout`` 동안 산다 — 11자리·5초면
+        **55초**이고, 그동안 모델은 이 도구에 붙들려 아무 말도 못 한다. 발신자에게는 그냥
+        먹통이다. ``None`` 을 주면 상한 없이 종전대로 돈다.
+
+        ⚠️ **수집값을 로그에 쓰지 않는다.** 키패드로 받는 값은 카드번호·주민번호일 수 있고,
+        실제로 그런 구성이 있다. ``secure`` 와 무관하게 **자릿수만** 남긴다 — 이 인자는
+        호환을 위해 남아 있을 뿐 로깅을 좌우하지 않는다.
+        """
         if self._dtmf_collector_active:
-            raise RuntimeError("이미 DTMF 수집 중입니다")
+            raise DtmfCollectorBusy("이미 DTMF 수집 중입니다")
 
         self._dtmf_collector_active = True
         # Don't create new queue — drain pre-buffered digits first
         collected: list[str] = []
+        deadline = (
+            asyncio.get_running_loop().time() + max_wait if max_wait is not None else None
+        )
 
         try:
             while len(collected) < max_digits:
+                wait_s = timeout
+                if deadline is not None:
+                    # 남은 예산이 자리 간 대기보다 짧으면 그만큼만 기다린다. 0 이하면
+                    # 전체 상한에 닿은 것이라 지금까지 모인 값으로 확정한다.
+                    wait_s = min(timeout, deadline - asyncio.get_running_loop().time())
+                    if wait_s <= 0:
+                        break
                 try:
-                    digit = await asyncio.wait_for(self._dtmf_queue.get(), timeout=timeout)
+                    digit = await asyncio.wait_for(self._dtmf_queue.get(), timeout=wait_s)
                     if digit == finish_on_key:
                         break
                     collected.append(digit)
@@ -189,10 +226,7 @@ class CallSession:
                 self._dtmf_queue.get_nowait()
 
         result = "".join(collected)
-        if secure:
-            log.info(f"DTMF collected: {'*' * len(result)} ({len(result)} digits, secure)")
-        else:
-            log.info(f"DTMF collected: {result}")
+        log.info("DTMF collected: %d digits", len(result))
         return result
 
     async def transfer(
