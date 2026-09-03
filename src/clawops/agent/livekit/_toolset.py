@@ -24,7 +24,7 @@ from livekit.agents.llm import ToolFlag, Toolset, function_tool
 from livekit.agents.voice.events import RunContext
 
 from .._builtin_tools import BuiltinTool
-from .._session import CallSession
+from .._session import CallSession, DtmfCollectorBusy
 
 log = logging.getLogger("clawops.agent.livekit")
 
@@ -129,6 +129,10 @@ class ClawOpsPhoneTools(Toolset):
                 timeout=timeout,
             )
             return result if result else "(타임아웃 - 입력 없음)"
+        except DtmfCollectorBusy:
+            # 고장이 아니라 중복 호출이다 — "Error" 로 돌려주면 모델이 도구가 망가진 줄 알고
+            # 다시 부르지 않고, 그때부터 발신자가 누르는 키는 아무도 받지 않는다.
+            return "(이미 입력을 받는 중입니다. 결과를 기다리세요.)"
         except Exception as e:
             return f"Error: {e}"
 

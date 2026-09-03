@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from ._agent import ClawOpsAgent, ToolConfig
 from ._builtin_tools import BuiltinTool
 from ._media_ws import MediaWebSocket
-from ._session import CallSession
+from ._session import CallSession, DtmfCollectorBusy
 from ._tool import ToolRegistry, function_tool
 from .pipeline import Session
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BuiltinTool",
     "CallSession",
+    "DtmfCollectorBusy",
     "ClawOpsAgent",
     "MediaWebSocket",
     "ToolConfig",
