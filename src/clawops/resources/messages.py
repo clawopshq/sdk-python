@@ -6,15 +6,21 @@ from .._resource import AsyncAPIResource, SyncAPIResource
 from .._utils import strip_not_given
 from ..pagination import AsyncPage, SyncPage
 from ..types.message import Message
-from ..types.message_params import KakaoFallbackParam, KakaoSendParam, TextMessageType
+from ..types.message_params import (
+    BrandSendParam,
+    KakaoFallbackParam,
+    KakaoSendParam,
+    TextMessageType,
+)
 
-_LIST_TYPE = Optional[Union[TextMessageType, Literal["ata"]]]
+_LIST_TYPE = Optional[Union[TextMessageType, Literal["ata", "bms"]]]
 _LIST_STATUS = Optional[Literal["queued", "sent", "failed", "received"]]
 
-_CREATE_DOC = """메시지를 발송합니다. **문자와 알림톡 두 가지 형태**입니다.
+_CREATE_DOC = """메시지를 발송합니다. **문자·알림톡·브랜드 메시지 세 가지 형태**입니다.
 
-문자(SMS/LMS/MMS)는 ``body`` 를, 카카오 알림톡은 ``kakao`` 를 줍니다. 둘은 섞을 수
-없습니다 — 서버가 배타적으로 검증하므로 오버로드로 미리 막습니다.
+문자(SMS/LMS/MMS)는 ``body``, 카카오 알림톡은 ``kakao``, 브랜드 메시지는 ``brand`` 를
+줍니다. 셋은 섞을 수 없습니다 — 서버가 배타적으로 검증하므로 오버로드로 미리 막고,
+타입체커를 쓰지 않아도 ``TypeError`` 로 먼저 거절합니다.
 
 Args:
     to: 수신 번호.
@@ -28,6 +34,11 @@ Args:
     kakao: 알림톡 채널·템플릿·변수. 이 값을 주면 알림톡입니다.
         ``channel_id`` 는 ``client.kakao.channels.list()``, ``template_id`` 는
         ``client.kakao.templates.list(channel_id=...)`` 로 얻습니다.
+    brand: 브랜드 메시지 채널·템플릿·변수. 이 값을 주면 브랜드 메시지입니다.
+        ``template_id`` 는 ``client.kakao.brand_templates.list(channel_id=...)`` 로
+        얻습니다 — 알림톡 템플릿과 **다른 표**입니다.
+        ⚠️ 광고성이라 20:50~08:00(KST)에는 ``422 kakao_brand_night_blocked`` 이고,
+        **대체발송이 없어** ``fallback`` 을 함께 줄 수 없습니다.
     fallback: 알림톡 발송 실패 시 대신 나갈 문자. 생략하면 템플릿 본문을 그대로
         보냅니다. **대체 발송은 별도 메시지 1건으로 문자 단가가 따로 청구됩니다.**
     extra_headers: 추가 HTTP 헤더.
@@ -48,7 +59,7 @@ Raises:
 _LIST_DOC = """메시지 목록을 조회합니다. ``auto_paging_iter()`` 로 전체 순회 가능.
 
 Args:
-    type: 메시지 유형으로 필터링. ``"ata"`` 는 카카오 알림톡입니다.
+    type: 메시지 유형으로 필터링. ``"ata"`` 는 카카오 알림톡, ``"bms"`` 는 브랜드 메시지입니다.
     status: 메시지 상태로 필터링.
         ⚠️ 응답에는 ``"sending"`` 도 나오지만 **필터로는 쓸 수 없습니다** —
         서버 쿼리 검증이 위 네 가지만 받아 400 을 냅니다.
@@ -64,6 +75,23 @@ Returns:
 """
 
 
+def _template_block(p: KakaoSendParam | BrandSendParam | None) -> dict[str, Any] | None:
+    """알림톡·브랜드의 템플릿 지정을 서버 표기(PascalCase)로 옮긴다.
+
+    두 채널의 입력 모양이 같아서 한 곳에 둔다 — 서버가 ``Variables`` 키 이름을 바꾸면
+    여기만 고치면 된다. ⚠️ ``strip_not_given`` 은 얕아서 중첩은 손으로 조립해야 한다.
+    """
+    if p is None:
+        return None
+    return strip_not_given(
+        {
+            "ChannelId": p["channel_id"],
+            "TemplateId": p["template_id"],
+            "Variables": p.get("variables"),
+        }
+    )
+
+
 def _build_create_body(
     *,
     to: str,
@@ -73,6 +101,7 @@ def _build_create_body(
     subject: str | None,
     media_url: list[str] | None,
     kakao: KakaoSendParam | None,
+    brand: BrandSendParam | None,
     fallback: KakaoFallbackParam | None,
 ) -> dict[str, Any]:
     """발송 요청 body 를 조립한다. sync/async 가 같은 규칙을 쓰도록 한 곳에 둔다.
@@ -80,20 +109,31 @@ def _build_create_body(
     오버로드는 타입체커를 돌리는 사람에게만 보인다. 여기서 한 번 더 거절하는 이유는
     mypy 없이 쓰는 사용자에게 400 대신 무엇이 잘못됐는지 알려주기 위해서다.
     """
-    if kakao is not None:
+    # ⛔ 둘을 같이 실으면 어느 쪽으로 나갈지 정해 줄 수 없다 — 서버도 kakao_type_conflict 다.
+    if kakao is not None and brand is not None:
+        raise TypeError("kakao 와 brand 는 함께 보낼 수 없습니다. 하나만 지정하세요.")
+
+    # 알림톡·브랜드는 본문 관련 규칙이 같다 — 갈리는 값만 뽑고 나머지는 한 벌로 쓴다.
+    if kakao is not None or brand is not None:
+        want_type, label = ("ata", "알림톡") if kakao is not None else ("bms", "브랜드 메시지")
         wrong = [n for n, v in (("body", body), ("subject", subject), ("media_url", media_url)) if v is not None]
         if wrong:
             raise TypeError(
-                f"알림톡과 함께 보낼 수 없는 인자입니다: {', '.join(wrong)}. "
-                "본문은 검수된 템플릿에서 오고, 문자로 대신 보낼 내용은 fallback 에 넣습니다."
+                f"{label}과(와) 함께 보낼 수 없는 인자입니다: {', '.join(wrong)}. "
+                "본문은 템플릿이 정합니다."
             )
-        if type is not None and type != "ata":
-            raise TypeError(f"kakao 를 주면 type 은 'ata' 여야 합니다 (받은 값: {type!r}).")
+        if type is not None and type != want_type:
+            raise TypeError(f"{label}은(는) type 이 {want_type!r} 여야 합니다 (받은 값: {type!r}).")
+        # 400 kakao_fallback_not_allowed
+        if brand is not None and fallback is not None:
+            raise TypeError("브랜드 메시지에는 fallback 을 쓸 수 없습니다. 대체발송이 없습니다.")
     else:
         if fallback is not None:
             raise TypeError("fallback 은 알림톡 전용입니다. kakao 와 함께 지정하세요.")
         if body is None:
-            raise TypeError("body(문자) 또는 kakao(알림톡) 중 하나는 반드시 지정해야 합니다.")
+            raise TypeError(
+                "body(문자)·kakao(알림톡)·brand(브랜드 메시지) 중 하나는 반드시 지정해야 합니다."
+            )
 
     # ⚠️ strip_not_given 은 얕다. 중첩 객체는 손으로 조립한다.
     return strip_not_given(
@@ -104,15 +144,8 @@ def _build_create_body(
             "Type": type,
             "Subject": subject,
             "MediaUrl": media_url,
-            "Kakao": None
-            if kakao is None
-            else strip_not_given(
-                {
-                    "ChannelId": kakao["channel_id"],
-                    "TemplateId": kakao["template_id"],
-                    "Variables": kakao.get("variables"),
-                }
-            ),
+            "Kakao": _template_block(kakao),
+            "Brand": _template_block(brand),
             "Fallback": None
             if fallback is None
             else strip_not_given(
@@ -172,16 +205,30 @@ class Messages(SyncAPIResource):
         timeout: float | None = None,
     ) -> Message: ...
 
+    @overload
+    def create(
+        self,
+        *,
+        to: str,
+        from_: str,
+        brand: BrandSendParam,
+        type: Literal["bms"] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> Message: ...
+
     def create(
         self,
         *,
         to: str,
         from_: str,
         body: str | None = None,
-        type: TextMessageType | Literal["ata"] | None = None,
+        type: TextMessageType | Literal["ata", "bms"] | None = None,
         subject: str | None = None,
         media_url: list[str] | None = None,
         kakao: KakaoSendParam | None = None,
+        brand: BrandSendParam | None = None,
         fallback: KakaoFallbackParam | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
@@ -189,7 +236,7 @@ class Messages(SyncAPIResource):
     ) -> Message:
         req_body = _build_create_body(
             to=to, from_=from_, body=body, type=type, subject=subject,
-            media_url=media_url, kakao=kakao, fallback=fallback,
+            media_url=media_url, kakao=kakao, brand=brand, fallback=fallback,
         )
         return self._client._post(
             f"{self._base_path}/messages", body=req_body, cast_to=Message,
@@ -278,16 +325,30 @@ class AsyncMessages(AsyncAPIResource):
         timeout: float | None = None,
     ) -> Message: ...
 
+    @overload
+    async def create(
+        self,
+        *,
+        to: str,
+        from_: str,
+        brand: BrandSendParam,
+        type: Literal["bms"] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> Message: ...
+
     async def create(
         self,
         *,
         to: str,
         from_: str,
         body: str | None = None,
-        type: TextMessageType | Literal["ata"] | None = None,
+        type: TextMessageType | Literal["ata", "bms"] | None = None,
         subject: str | None = None,
         media_url: list[str] | None = None,
         kakao: KakaoSendParam | None = None,
+        brand: BrandSendParam | None = None,
         fallback: KakaoFallbackParam | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
@@ -295,7 +356,7 @@ class AsyncMessages(AsyncAPIResource):
     ) -> Message:
         req_body = _build_create_body(
             to=to, from_=from_, body=body, type=type, subject=subject,
-            media_url=media_url, kakao=kakao, fallback=fallback,
+            media_url=media_url, kakao=kakao, brand=brand, fallback=fallback,
         )
         return await self._client._post(
             f"{self._base_path}/messages", body=req_body, cast_to=Message,

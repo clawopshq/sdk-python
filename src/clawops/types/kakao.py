@@ -20,6 +20,24 @@ KakaoChannelStatus = Union[Literal["connected", "needs_attention"], str]
 KakaoChannelListStatus = Union[Literal["connected", "needs_attention", "all"], str]
 """채널 목록 필터. 미지정 시 전체(``all``)."""
 
+BrandBubbleType = Union[
+    Literal[
+        "TEXT",
+        "IMAGE",
+        "WIDE",
+        "WIDE_ITEM_LIST",
+        "CAROUSEL_FEED",
+        "COMMERCE",
+        "CAROUSEL_COMMERCE",
+    ],
+    str,
+]
+"""브랜드 메시지 말풍선 유형. **이 값이 단가를 정한다.**
+
+위와 같은 이유로 열어 둔다. ``PREMIUM_VIDEO`` 는 카카오TV 종료로 등록 경로가 막혀
+알려진 값에서 뺐다.
+"""
+
 
 class KakaoChannel(BaseModel):
     """이 계정에 연결된 카카오 비즈니스 채널.
@@ -85,6 +103,37 @@ class KakaoTemplate(BaseModel):
     assign_type: str
     message_type: str
     emphasize_type: str
+    variables: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class KakaoBrandTemplate(BaseModel):
+    """브랜드 메시지 템플릿.
+
+    ⭐ **알림톡과 달리 검수가 없다** — ``status``·``dormant``·``sendable`` 이 없는
+    이유이고, 목록에 있으면 곧 발송할 수 있다.
+
+    Attributes:
+        id: **ClawOps 템플릿 리소스 ID.** 발송의 ``brand["template_id"]`` 에 쓴다.
+        channel_id: ClawOps 채널 리소스 ID. 발송의 ``brand["channel_id"]`` 와 같은 값이다.
+        name: 템플릿 이름.
+        chat_bubble_type: 말풍선 유형. 텍스트형이 가장 싸고 와이드리스트·캐러셀·
+            커머스가 가장 비싸다. 근거는 :data:`BrandBubbleType` 참고.
+        content: 말풍선 본문. ⚠️ **유형에 따라 ``None`` 이다** — 본문이 담기는 자리가
+            유형마다 달라 ``TEXT``·``IMAGE``·``WIDE`` 에만 채워진다.
+        header: 와이드리스트형의 머리말. 다른 유형에서는 ``None``.
+        variables: 발송 시 ``brand["variables"]`` 에 모두 채워야 하는 변수 이름.
+        created_at: 생성 시각.
+        updated_at: 수정 시각.
+    """
+
+    id: str
+    channel_id: str
+    name: str
+    chat_bubble_type: BrandBubbleType
+    content: Optional[str] = None
+    header: Optional[str] = None
     variables: list[str]
     created_at: datetime
     updated_at: datetime

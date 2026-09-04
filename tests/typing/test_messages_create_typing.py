@@ -15,11 +15,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from clawops import AsyncClawOps, ClawOps
-    from clawops.types.message_params import KakaoSendParam
+    from clawops.types.message_params import BrandSendParam, KakaoSendParam
 
     client: ClawOps
     aclient: AsyncClawOps
     KAKAO: KakaoSendParam
+    BRAND: BrandSendParam
 
     # ── 통과해야 하는 것 ──────────────────────────────────────
     client.messages.create(to="010", from_="070", body="안녕하세요")
@@ -27,7 +28,10 @@ if TYPE_CHECKING:
     client.messages.create(to="010", from_="070", body="사진", type="mms", media_url=["https://e.com/a.jpg"])
     client.messages.create(to="010", from_="070", kakao=KAKAO)
     client.messages.create(to="010", from_="070", kakao=KAKAO, type="ata", fallback={"body": "대체"})
+    client.messages.create(to="010", from_="070", brand=BRAND)
+    client.messages.create(to="010", from_="070", brand=BRAND, type="bms")
     client.messages.list(type="ata", number="07052358010")
+    client.messages.list(type="bms")
 
     # ── 막아야 하는 것 ────────────────────────────────────────
     # 문자와 알림톡을 섞을 수 없다.
@@ -47,7 +51,25 @@ if TYPE_CHECKING:
     client.messages.create(  # type: ignore[call-overload]
         to="010", from_="070", body="안녕하세요", fallback={"body": "대체"},
     )
-    # body 도 kakao 도 없으면 어느 오버로드에도 맞지 않는다.
+    # 브랜드도 같은 규칙이다.
+    client.messages.create(  # type: ignore[call-overload]
+        to="010", from_="070", body="안녕하세요", brand=BRAND,
+    )
+    client.messages.create(  # type: ignore[call-overload]
+        to="010", from_="070", brand=BRAND, media_url=["https://e.com/a.jpg"],
+    )
+    client.messages.create(  # type: ignore[call-overload]
+        to="010", from_="070", brand=BRAND, type="sms",
+    )
+    # 브랜드는 대체발송이 없다 — 서버가 400 kakao_fallback_not_allowed 로 거절한다.
+    client.messages.create(  # type: ignore[call-overload]
+        to="010", from_="070", brand=BRAND, fallback={"body": "대체"},
+    )
+    # 둘을 같이 실으면 어느 쪽으로 나갈지 정해 줄 수 없다.
+    client.messages.create(  # type: ignore[call-overload]
+        to="010", from_="070", kakao=KAKAO, brand=BRAND,
+    )
+    # body 도 kakao 도 brand 도 없으면 어느 오버로드에도 맞지 않는다.
     client.messages.create(to="010", from_="070")  # type: ignore[call-overload]
     # 응답에만 있는 상태는 필터로 못 쓴다.
     client.messages.list(status="sending")  # type: ignore[arg-type]

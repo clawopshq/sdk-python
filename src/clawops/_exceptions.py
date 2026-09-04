@@ -27,6 +27,14 @@ ClawOpsErrorCode = Union[
         "kakao_template_not_found",
         "kakao_template_not_approved",
         "kakao_template_dormant",
+        # 브랜드 메시지 — 알림톡과 공유하는 코드(kakao_body_not_allowed 등)는 위에 있다.
+        "kakao_brand_required",
+        "kakao_brand_template_not_found",
+        # 광고성이라 20:50~08:00(KST)에는 접수되지 않는다. 하루 11시간 동안 나오므로
+        # 재시도 스케줄링이 이 분기에 달린다 — 오타 한 글자가 그 로직을 무력화한다.
+        "kakao_brand_night_blocked",
+        # 브랜드는 대체발송이 없다 — fallback 을 실으면 이 코드다.
+        "kakao_fallback_not_allowed",
         "body_too_long",
         "invalid_phone",
         "invalid_input",

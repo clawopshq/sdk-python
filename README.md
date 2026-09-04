@@ -454,6 +454,42 @@ channel = client.kakao.channels.connect(
 client.kakao.channels.disconnect(channel.id)
 ```
 
+### 카카오 브랜드 메시지 (Brand)
+
+채널을 **추가한 친구**에게 나가는 광고성 메시지입니다. 등록한 템플릿으로 보냅니다.
+
+```python
+channels = client.kakao.channels.list(status="connected")
+templates = client.kakao.brand_templates.list(channel_id=channels.data[0].id)
+
+msg = client.messages.create(
+    to="01012345678",
+    from_="07052358010",
+    brand={
+        "channel_id": channels.data[0].id,
+        "template_id": templates.data[0].id,
+        "variables": {"고객명": "홍길동"},
+    },
+)
+print(msg.type)  # 'bms'
+```
+
+⭐ **알림톡과 달리 검수가 없습니다** — `brand_templates.list()` 가 돌려준 템플릿은 전부 바로
+쓸 수 있어 `sendable` 같은 칸이 없습니다. 알림톡 템플릿과는 **다른 표**라 `templates` 가 아닌
+`brand_templates` 로 조회합니다.
+
+알림톡과 갈리는 점 둘:
+
+- **야간에 보낼 수 없습니다.** 오후 8시 50분 ~ 다음 날 오전 8시(KST)는
+  `422 kakao_brand_night_blocked` 입니다. 접수 전에 막으므로 예약되지 않습니다.
+- **대체발송이 없습니다.** 카카오톡을 쓰지 않는 수신자에게 문자로 대신 나가지 않습니다.
+  `fallback` 을 함께 주면 타입 에러이고, 타입체커를 쓰지 않아도 `TypeError` 로 거절합니다.
+
+`(광고)` 표기와 수신거부 안내는 **카카오가 붙이므로** 본문에 넣지 마십시오.
+
+⚠️ 단가가 알림톡보다 훨씬 높고 **말풍선 유형에 따라 갈립니다** — 템플릿의 `chat_bubble_type`
+이 그 축입니다. `content` 는 유형에 따라 `None` 일 수 있습니다(본문이 담기는 자리가 다릅니다).
+
 ### 멀티 계정 접근
 
 ```python

@@ -6,12 +6,19 @@ import respx
 
 from clawops._base_client import AsyncAPIClient, SyncAPIClient
 from clawops.resources.kakao import AsyncKakao, Kakao
-from clawops.types.kakao import KakaoChannel, KakaoChannelCategoryList, KakaoTemplate, KakaoTokenRequest
+from clawops.types.kakao import (
+    KakaoBrandTemplate,
+    KakaoChannel,
+    KakaoChannelCategoryList,
+    KakaoTemplate,
+    KakaoTokenRequest,
+)
 
 BASE = "https://api.claw-ops.com"
 ACCOUNT = "AC1a2b3c4d"
 CHANNELS = f"/v1/accounts/{ACCOUNT}/kakao/channels"
 TEMPLATES = f"/v1/accounts/{ACCOUNT}/kakao/templates"
+BRAND_TEMPLATES = f"/v1/accounts/{ACCOUNT}/kakao/brand-templates"
 CATEGORIES = f"/v1/accounts/{ACCOUNT}/kakao/channel-categories"
 
 # app/spec 의 example 을 그대로 옮긴 것. 픽스처가 상상한 페이로드면 계약을 못 지킨다.
@@ -211,6 +218,59 @@ class TestTemplates:
         assert t.sendable is False
 
 
+BRAND_TEMPLATE_JSON = {
+    "id": "clx9bms0001",
+    "channelId": "clx9kak0001",
+    "name": "9월 신상품 안내",
+    "chatBubbleType": "TEXT",
+    "content": "#{고객명}님, 9월 신상품이 도착했습니다.",
+    "header": None,
+    "variables": ["#{고객명}"],
+    "createdAt": "2026-09-01T00:00:00Z",
+    "updatedAt": "2026-09-01T00:00:00Z",
+}
+
+
+class TestBrandTemplates:
+    @respx.mock
+    def test_uses_its_own_path(self, kakao):
+        """알림톡 템플릿과 **다른 표**다 — 경로가 갈린다."""
+        route = respx.get(f"{BASE}{BRAND_TEMPLATES}").mock(
+            return_value=httpx.Response(200, json=_page([BRAND_TEMPLATE_JSON]))
+        )
+        items = list(kakao.brand_templates.list(channel_id="clx9kak0001"))
+        url = str(route.calls[0].request.url)
+        assert "/kakao/brand-templates" in url
+        assert "channelId=clx9kak0001" in url
+        assert isinstance(items[0], KakaoBrandTemplate)
+        assert items[0].id == "clx9bms0001"
+
+    @respx.mock
+    def test_content_and_header_are_nullable(self, kakao):
+        """본문이 담기는 자리가 버블 타입마다 다르다 — TEXT·IMAGE·WIDE 만 content 가 찬다."""
+        respx.get(f"{BASE}{BRAND_TEMPLATES}").mock(return_value=httpx.Response(
+            200,
+            json=_page([{
+                **BRAND_TEMPLATE_JSON,
+                "chatBubbleType": "WIDE_ITEM_LIST",
+                "content": None,
+                "header": "가을 기획전",
+            }]),
+        ))
+        t = list(kakao.brand_templates.list(channel_id="c1"))[0]
+        assert t.content is None
+        assert t.header == "가을 기획전"
+
+    @respx.mock
+    def test_open_vocabulary_bubble_type(self, kakao):
+        """카카오가 유형을 늘리면 닫힌 Literal 은 목록 전체를 던진다."""
+        respx.get(f"{BASE}{BRAND_TEMPLATES}").mock(return_value=httpx.Response(
+            200, json=_page([{**BRAND_TEMPLATE_JSON, "chatBubbleType": "아직-없는-유형"}])
+        ))
+        t = list(kakao.brand_templates.list(channel_id="c1"))[0]
+        assert t.chat_bubble_type == "아직-없는-유형"
+
+
 class TestChannelCategories:
     @respx.mock
     def test_channel_categories(self, kakao):
@@ -267,6 +327,19 @@ class TestAsyncKakao:
         )
         assert ch.id == "clx9kak0001"
         assert (await async_kakao.channels.disconnect("clx9kak0001")).id == "clx9kak0001"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_brand_templates(self, async_kakao):
+        """AsyncKakaoBrandTemplates 는 손으로 쓴 두 번째 벌이라 여기서만 실행된다."""
+        route = respx.get(f"{BASE}{BRAND_TEMPLATES}").mock(
+            return_value=httpx.Response(200, json=_page([BRAND_TEMPLATE_JSON]))
+        )
+        page = await async_kakao.brand_templates.list(channel_id="clx9kak0001")
+        url = str(route.calls[0].request.url)
+        assert "/kakao/brand-templates" in url
+        assert "channelId=clx9kak0001" in url
+        assert [t.id for t in page] == ["clx9bms0001"]
 
     @respx.mock
     @pytest.mark.asyncio
