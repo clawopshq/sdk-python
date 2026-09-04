@@ -5,9 +5,11 @@ from .calls import AsyncCalls, Calls
 from .kakao import (
     AsyncKakao,
     AsyncKakaoChannels,
+    AsyncKakaoBrandTemplates,
     AsyncKakaoTemplates,
     Kakao,
     KakaoChannels,
+    KakaoBrandTemplates,
     KakaoTemplates,
 )
 from .messages import AsyncMessages, Messages
@@ -21,9 +23,9 @@ __all__ = [
     "AssignmentLinks", "AsyncAssignmentLinks",
     "AsyncBlockedRecipients", "BlockedRecipients",
     "AsyncCalls", "AsyncMessages", "AsyncNumbers", "AsyncRecordings",
-    "AsyncKakao", "AsyncKakaoChannels", "AsyncKakaoTemplates",
+    "AsyncKakao", "AsyncKakaoChannels", "AsyncKakaoTemplates", "AsyncKakaoBrandTemplates",
     "AsyncSipCredentials", "AsyncSipEndpoints",
     "Calls", "Messages", "Numbers", "Recordings",
-    "Kakao", "KakaoChannels", "KakaoTemplates",
+    "Kakao", "KakaoChannels", "KakaoTemplates", "KakaoBrandTemplates",
     "SipCredentials", "SipEndpoints",
 ]

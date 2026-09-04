@@ -100,15 +100,59 @@ class KakaoMessageCreateParams(_MessageCreateBaseParams, total=False):
     """생략해도 됩니다. 명시한다면 ``"ata"`` 여야 합니다."""
 
 
-MessageCreateParams = Union[TextMessageCreateParams, KakaoMessageCreateParams]
-"""메시지 발송 요청 파라미터. 문자와 알림톡 중 하나입니다."""
+class BrandSendParam(TypedDict, total=False):
+    """카카오 브랜드 메시지 발송 지정.
+
+    이 항목을 실으면 브랜드 메시지입니다. ID 는 ``client.kakao.channels.list()`` /
+    ``client.kakao.brand_templates.list()`` 로 얻습니다 — 알림톡 템플릿과 **다른 표**라
+    ``templates`` 가 아닙니다.
+    """
+
+    channel_id: Required[Annotated[str, PropertyInfo(alias="ChannelId")]]
+    """ClawOps 채널 리소스 ID (채널 목록의 ``id``). 카카오 검색용 ID 가 아닙니다."""
+
+    template_id: Required[Annotated[str, PropertyInfo(alias="TemplateId")]]
+    """ClawOps 브랜드 템플릿 리소스 ID (브랜드 템플릿 목록의 ``id``)."""
+
+    variables: Annotated[dict[str, str], PropertyInfo(alias="Variables")]
+    """템플릿 변수. 키는 ``고객명`` 과 ``#{고객명}`` 을 **모두** 받습니다.
+
+    빠지면 ``400 kakao_variable_missing``, 템플릿에 없는 변수를 주면
+    ``400 kakao_variable_unknown`` 입니다. 요구 목록은 템플릿의 ``variables`` 에 있습니다.
+    """
+
+
+class BrandMessageCreateParams(_MessageCreateBaseParams, total=False):
+    """카카오 브랜드 메시지 발송 요청 파라미터.
+
+    채널을 **추가한 친구**에게 나가는 광고성 메시지입니다. 알림톡과 갈리는 점 둘:
+
+    - **야간에 보낼 수 없습니다.** 오후 8시 50분 ~ 다음 날 오전 8시(KST)는
+      ``422 kakao_brand_night_blocked`` 입니다. 접수 전에 막으므로 예약되지 않습니다.
+    - **대체발송이 없습니다.** ``fallback`` 을 실으면 ``400 kakao_fallback_not_allowed``
+      이고, TypedDict 가 닫혀 있어 타입에서도 걸립니다.
+
+    ``(광고)`` 표기와 수신거부 안내는 **카카오가 붙이므로** 본문에 넣지 않습니다.
+    """
+
+    brand: Required[BrandSendParam]
+    """브랜드 채널·템플릿·변수. 이 항목이 있으면 브랜드 메시지입니다."""
+
+    type: Literal["bms"]
+    """생략해도 됩니다. 명시한다면 ``"bms"`` 여야 합니다."""
+
+
+MessageCreateParams = Union[
+    TextMessageCreateParams, KakaoMessageCreateParams, BrandMessageCreateParams
+]
+"""메시지 발송 요청 파라미터. 문자·알림톡·브랜드 메시지 중 하나입니다."""
 
 
 class MessageListParams(TypedDict, total=False):
     """메시지 목록 조회 요청 파라미터."""
 
-    type: Union[TextMessageType, Literal["ata"]]
-    """메시지 유형으로 필터링. ``"ata"`` 는 카카오 알림톡입니다."""
+    type: Union[TextMessageType, Literal["ata", "bms"]]
+    """메시지 유형으로 필터링. ``"ata"`` 는 카카오 알림톡, ``"bms"`` 는 브랜드 메시지입니다."""
 
     status: Literal["queued", "sent", "failed", "received"]
     """메시지 상태로 필터링.

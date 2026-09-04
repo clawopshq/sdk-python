@@ -18,9 +18,11 @@ if TYPE_CHECKING:
         KakaoSendParam,
         MessageCreateParams,
         MessageListParams,
+        BrandSendParam,
     )
 
     _KAKAO: KakaoSendParam = {"channel_id": "clx9kak0001", "template_id": "clx9tpl0001"}
+    _BRAND: BrandSendParam = {"channel_id": "clx9kak0001", "template_id": "clx9bms0001"}
 
     # ── 통과해야 하는 것 ──────────────────────────────────────
     _text: MessageCreateParams = {"to": "010", "from_": "070", "body": "안녕하세요"}
@@ -31,6 +33,10 @@ if TYPE_CHECKING:
     _kakao_full: MessageCreateParams = {
         "to": "010", "from_": "070", "kakao": _KAKAO, "type": "ata",
         "fallback": {"body": "주문이 접수되었습니다.", "type": "lms"},
+    }
+    _brand: MessageCreateParams = {"to": "010", "from_": "070", "brand": _BRAND}
+    _brand_typed: MessageCreateParams = {
+        "to": "010", "from_": "070", "brand": _BRAND, "type": "bms",
     }
 
     # ── 막아야 하는 것 ────────────────────────────────────────
@@ -75,8 +81,24 @@ if TYPE_CHECKING:
         "kakao": {"channel_id": "clx9kak0001"},  # type: ignore[typeddict-item]
     }
 
+    # 브랜드도 같은 규칙이다 — 본문은 템플릿이 정한다.
+    _brand_body: MessageCreateParams = {  # type: ignore[assignment]
+        "to": "010", "from_": "070", "body": "안녕하세요", "brand": _BRAND,
+    }
+
+    # 브랜드는 대체발송이 없다 (400 kakao_fallback_not_allowed).
+    _brand_fallback: MessageCreateParams = {  # type: ignore[assignment]
+        "to": "010", "from_": "070", "brand": _BRAND, "fallback": {"body": "대체"},
+    }
+
+    # 둘을 같이 실으면 어느 쪽으로 나갈지 정해 줄 수 없다 (400 kakao_type_conflict).
+    _kakao_and_brand: MessageCreateParams = {  # type: ignore[assignment]
+        "to": "010", "from_": "070", "kakao": _KAKAO, "brand": _BRAND,
+    }
+
     # ── 목록 필터 ─────────────────────────────────────────────
     _list_ata: MessageListParams = {"type": "ata", "number": "07052358010"}
+    _list_bms: MessageListParams = {"type": "bms"}
 
     # 서버 쿼리 검증이 sending 을 받지 않는다 — 보내면 400 이다.
     _list_sending: MessageListParams = {"status": "sending"}  # type: ignore[typeddict-item]

@@ -30,6 +30,13 @@ ATA_JSON = {
     "body": "홍길동님, 주문이 접수되었습니다.",
 }
 
+BMS_JSON = {
+    **ATA_JSON,
+    "messageId": "MG_bms",
+    "type": "bms",
+    "body": "홍길동님, 9월 신상품이 도착했습니다.",
+}
+
 
 @pytest.fixture
 def client():
@@ -120,6 +127,29 @@ class TestMessagesCreateKakao:
         assert parsed["Kakao"] == {"ChannelId": "c1", "TemplateId": "t1"}
 
     @respx.mock
+    def test_create_bms(self, messages):
+        route = respx.post(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(201, json=BMS_JSON))
+        msg = messages.create(
+            to="01012345678", from_="07052358010",
+            brand={
+                "channel_id": "clx9kak0001",
+                "template_id": "clx9bms0001",
+                "variables": {"고객명": "홍길동"},
+            },
+        )
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["Brand"] == {
+            "ChannelId": "clx9kak0001",
+            "TemplateId": "clx9bms0001",
+            "Variables": {"고객명": "홍길동"},
+        }
+        # 본문은 템플릿이 정한다. 알림톡 칸과 섞이지도 않아야 한다.
+        assert "Body" not in parsed
+        assert "Type" not in parsed
+        assert "Kakao" not in parsed
+        assert msg.type == "bms"
+
+    @respx.mock
     def test_create_ata_with_fallback(self, messages):
         route = respx.post(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(201, json=ATA_JSON))
         messages.create(
@@ -180,6 +210,25 @@ class TestMessagesCreateExclusivity:
     def test_neither_body_nor_kakao_rejected(self, messages):
         with pytest.raises(TypeError, match="반드시"):
             messages.create(to="010", from_="070")
+
+    BRAND = {"channel_id": "c1", "template_id": "t1"}
+
+    def test_body_with_brand_rejected(self, messages):
+        with pytest.raises(TypeError, match="함께 보낼 수 없는"):
+            messages.create(to="010", from_="070", body="안녕", brand=self.BRAND)
+
+    def test_conflicting_type_with_brand_rejected(self, messages):
+        with pytest.raises(TypeError, match="'bms'"):
+            messages.create(to="010", from_="070", brand=self.BRAND, type="sms")
+
+    def test_fallback_with_brand_rejected(self, messages):
+        with pytest.raises(TypeError, match="대체발송이 없습니다"):
+            messages.create(to="010", from_="070", brand=self.BRAND, fallback={"body": "x"})
+
+    def test_kakao_with_brand_rejected(self, messages):
+        """둘을 같이 실으면 어느 쪽으로 나갈지 정해 줄 수 없다 — 서버는 kakao_type_conflict."""
+        with pytest.raises(TypeError, match="함께 보낼 수 없습니다"):
+            messages.create(to="010", from_="070", kakao=self.KAKAO, brand=self.BRAND)
 
     def test_nothing_is_sent_when_rejected(self, messages):
         """거절은 HTTP 이전이다 — respx 를 걸지 않아도 네트워크가 나가지 않는다."""
@@ -389,6 +438,31 @@ class TestAsyncMessagesCreateKakao:
         with pytest.raises(TypeError, match="함께 보낼 수 없는"):
             await async_messages.create(
                 to="010", from_="070", body="안녕", kakao={"channel_id": "c1", "template_id": "t1"}
+            )
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_create_bms(self, async_messages):
+        """async 오버로드와 조립도 손으로 쓴 두 번째 벌이라 여기서만 실행된다."""
+        route = respx.post(f"{BASE}{MESSAGES_PATH}").mock(
+            return_value=httpx.Response(201, json=BMS_JSON)
+        )
+        msg = await async_messages.create(
+            to="01012345678", from_="07052358010",
+            brand={"channel_id": "clx9kak0001", "template_id": "clx9bms0001"},
+        )
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["Brand"] == {"ChannelId": "clx9kak0001", "TemplateId": "clx9bms0001"}
+        assert msg.type == "bms"
+
+    @pytest.mark.asyncio
+    async def test_fallback_with_brand_rejected(self, async_messages):
+        """거절은 HTTP 이전이다 — async 경로도 같은 규칙을 탄다."""
+        with pytest.raises(TypeError, match="대체발송이 없습니다"):
+            await async_messages.create(
+                to="010", from_="070",
+                brand={"channel_id": "c1", "template_id": "t1"},
+                fallback={"body": "x"},
             )
 
     @respx.mock

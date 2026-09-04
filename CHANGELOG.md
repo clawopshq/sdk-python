@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.50.0 (2026-09-05)
+
+### Added
+- **카카오 브랜드 메시지 발송.** 채널을 **추가한 친구**에게 나가는 광고성 메시지입니다.
+  ```python
+  templates = client.kakao.brand_templates.list(channel_id=channel_id)
+  client.messages.create(
+      to="01012345678", from_="07052358010",
+      brand={"channel_id": channel_id, "template_id": templates.data[0].id,
+             "variables": {"고객명": "홍길동"}},
+  )
+  ```
+  문자·알림톡과 **배타적**입니다. 오버로드가 타입체커에서 막고, **타입체커를 쓰지 않아도 `TypeError` 로 먼저 거절**합니다(서버 400 을 기다리지 않습니다).
+  - ⚠️ **야간에 보낼 수 없습니다.** 20:50~08:00(KST)은 `422 kakao_brand_night_blocked` 입니다.
+  - ⚠️ **대체발송이 없습니다.** `fallback` 을 함께 주면 거절합니다.
+- **`client.kakao.brand_templates`** — 브랜드 메시지 템플릿 목록. 알림톡 템플릿과 **다른 표**라 `templates` 가 아닌 이쪽으로 조회합니다. sync·async 모두 지원합니다.
+  - ⭐ **검수가 없어** `status`·`dormant`·`sendable` 이 없습니다. 목록에 있으면 곧 보낼 수 있습니다.
+  - `content`·`header` 는 **`None` 일 수 있습니다** — 본문이 담기는 자리가 말풍선 유형마다 달라 `TEXT`·`IMAGE`·`WIDE` 만 `content` 가 찹니다.
+  - `chat_bubble_type` 은 열린 유니온입니다(카카오가 유형을 늘려도 목록이 살아 있습니다).
+- **`messages.list(type="bms")`** — 브랜드 메시지만 골라 봅니다.
+- **브랜드 전용 오류 코드를 `ClawOpsErrorCode` 에 등록했습니다** — `kakao_brand_night_blocked` · `kakao_fallback_not_allowed` · `kakao_brand_required` · `kakao_brand_template_not_found`.
+  - SDK 는 야간 여부를 **직접 재지 않습니다**(호출자 머신의 시계·타임존에 법적 판정을 얹지 않으려는 것입니다). 그래서 야간 실패에 대해 드릴 수 있는 유일한 도구가 이 코드이고, **하루 11시간 동안 나오며 재시도 스케줄링이 이 분기에 달립니다.**
+  ```python
+  except BadRequestError as e:
+      if e.code == "kakao_brand_night_blocked": schedule_after_8am()
+  ```
+- 새 타입: `BrandMessageCreateParams` · `BrandSendParam` · `KakaoBrandTemplate` · `BrandBubbleType`.
+  `KakaoBrandTemplates` · `AsyncKakaoBrandTemplates` 는 `clawops.resources` 에서도 가져올 수 있습니다.
+
+⚠️ 서버 배포(2026-09-04)가 선행되어야 합니다. 그 전 서버에서는 `Brand` 를 모르는 스펙이라 `400` 입니다.
+
 ## 0.49.0 (2026-09-05)
 
 **전사 응답의 닫힌 어휘 둘이 조회를 통째로 던지고 있었습니다.** 이 어휘는 서버가 소유하는데

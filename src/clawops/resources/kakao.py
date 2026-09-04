@@ -4,6 +4,7 @@ from .._resource import AsyncAPIResource, SyncAPIResource
 from .._utils import strip_not_given
 from ..pagination import AsyncPage, SyncPage
 from ..types.kakao import (
+    KakaoBrandTemplate,
     KakaoChannel,
     KakaoChannelCategoryList,
     KakaoChannelListStatus,
@@ -146,6 +147,32 @@ Args:
 Raises:
     BadRequestError: channel_id 누락 또는 페이지 입력 오류 (VALIDATION).
     NotFoundError: 이 계정에 연결된 채널이 아님.
+"""
+
+_BRAND_TEMPLATES_DOC = """브랜드 메시지 템플릿 리소스.
+
+알림톡 템플릿과 **다른 표**다 — ``templates`` 가 아니라 이쪽으로 조회한다.
+"""
+
+_BRAND_TEMPLATES_LIST_DOC = """채널에서 사용할 수 있는 브랜드 메시지 템플릿을 조회합니다.
+
+응답의 ``id`` 를 발송의 ``brand["template_id"]`` 로, ``channel_id`` 를
+``brand["channel_id"]`` 로 씁니다. ``variables`` 의 모든 항목을 ``brand["variables"]``
+에 채워야 합니다.
+
+⭐ **알림톡과 달리 검수가 없어** ``sendable`` 같은 칸이 없습니다 — 목록에 있으면 곧
+보낼 수 있습니다.
+
+Args:
+    channel_id: ClawOps 채널 리소스 ID. **필수입니다** — 없으면 400 입니다.
+    page: 페이지 번호 (0부터 시작).
+    page_size: 페이지당 항목 수 (기본 20, 최대 100).
+    extra_headers: 추가 HTTP 헤더.
+    extra_query: 추가 쿼리 파라미터.
+    timeout: 이 요청의 타임아웃 (초).
+
+Returns:
+    KakaoBrandTemplate 객체의 페이지.
 """
 
 _KAKAO_DOC = """카카오 알림톡 리소스 묶음.
@@ -313,6 +340,32 @@ class KakaoTemplates(SyncAPIResource):
     list.__doc__ = _TEMPLATES_LIST_DOC
 
 
+class KakaoBrandTemplates(SyncAPIResource):
+    __doc__ = _BRAND_TEMPLATES_DOC
+
+    @property
+    def _path(self) -> str:
+        return f"{self._base_path}/kakao/brand-templates"
+
+    def list(
+        self,
+        *,
+        channel_id: str,
+        page: int | None = None,
+        page_size: int | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> SyncPage[KakaoBrandTemplate]:
+        query = _template_list_query(channel_id=channel_id, page=page, page_size=page_size)
+        return self._client._get_page(
+            self._path, cast_to=KakaoBrandTemplate, query=query,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    list.__doc__ = _BRAND_TEMPLATES_LIST_DOC
+
+
 class Kakao(SyncAPIResource):
     __doc__ = _KAKAO_DOC
 
@@ -323,6 +376,10 @@ class Kakao(SyncAPIResource):
     @property
     def templates(self) -> KakaoTemplates:
         return KakaoTemplates(client=self._client, account_id=self._account_id)
+
+    @property
+    def brand_templates(self) -> KakaoBrandTemplates:
+        return KakaoBrandTemplates(client=self._client, account_id=self._account_id)
 
     def channel_categories(
         self,
@@ -462,6 +519,32 @@ class AsyncKakaoTemplates(AsyncAPIResource):
     list.__doc__ = _TEMPLATES_LIST_DOC
 
 
+class AsyncKakaoBrandTemplates(AsyncAPIResource):
+    __doc__ = _BRAND_TEMPLATES_DOC
+
+    @property
+    def _path(self) -> str:
+        return f"{self._base_path}/kakao/brand-templates"
+
+    async def list(
+        self,
+        *,
+        channel_id: str,
+        page: int | None = None,
+        page_size: int | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> AsyncPage[KakaoBrandTemplate]:
+        query = _template_list_query(channel_id=channel_id, page=page, page_size=page_size)
+        return await self._client._get_page(
+            self._path, cast_to=KakaoBrandTemplate, query=query,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    list.__doc__ = _BRAND_TEMPLATES_LIST_DOC
+
+
 class AsyncKakao(AsyncAPIResource):
     __doc__ = _KAKAO_DOC
 
@@ -472,6 +555,10 @@ class AsyncKakao(AsyncAPIResource):
     @property
     def templates(self) -> AsyncKakaoTemplates:
         return AsyncKakaoTemplates(client=self._client, account_id=self._account_id)
+
+    @property
+    def brand_templates(self) -> AsyncKakaoBrandTemplates:
+        return AsyncKakaoBrandTemplates(client=self._client, account_id=self._account_id)
 
     async def channel_categories(
         self,
