@@ -13,8 +13,8 @@ from .._models import BaseModel
 #
 # Union[Literal[...], str] 은 타입체커에겐 str 이지만 IDE 자동완성은 살아 있다.
 # 넓은 파서 쪽이 안전하다 — 모르는 값은 그대로 통과시킨다.
-MessageType = Union[Literal["sms", "lms", "mms", "ata"], str]
-"""메시지 유형. `ata` 는 카카오 알림톡. 서버가 값을 늘릴 수 있어 열려 있다."""
+MessageType = Union[Literal["sms", "lms", "mms", "ata", "bms"], str]
+"""메시지 유형. `ata` 는 카카오 알림톡, `bms` 는 카카오 브랜드 메시지. 서버가 값을 늘릴 수 있어 열려 있다."""
 
 MessageStatus = Union[Literal["queued", "sending", "sent", "failed", "received"], str]
 """메시지 상태. 서버가 값을 늘릴 수 있어 열려 있다."""
