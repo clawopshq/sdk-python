@@ -1,13 +1,19 @@
 # Changelog
 
-## 0.48.1 (2026-09-05)
+## 0.49.0 (2026-09-05)
+
+**전사 응답의 닫힌 어휘 둘이 조회를 통째로 던지고 있었습니다.** 이 어휘는 서버가 소유하는데
+SDK 가 손으로 복제해 두고 있었고, 값이 하나 늘 때마다 같은 사고가 납니다 — 0.28 `routingType`,
+0.47 `type: "ata"` 에 이은 3·4회차입니다.
 
 ### Fixed
-- **🔴 전사를 조회하면 SDK 가 예외를 던지던 것 — 2026-08 이후 전사된 통화 전부.** 서버는 화자를 `speaker_0`·`speaker_1`… 로 줍니다(전환 통화처럼 참여자가 셋 이상이면 그만큼 늘어납니다). 그런데 `TranscriptSegment.speaker` 가 `Literal["CUSTOMER", "AGENT"]` 로 닫혀 있어서, `calls.get_transcript()` 가 최근 전사에 대해 `APIResponseValidationError` 를 냈습니다.
-  - **`segments` 는 리스트라 조각 하나가 응답 전체를 죽입니다.** 통화 한 건의 전사를 통째로 못 받습니다.
+- **🔴 전사를 조회하면 예외가 나던 것 — 2026-08 이후 전사된 통화 전부.** 서버는 화자를 `speaker_0`·`speaker_1`… 로 줍니다(전환 통화처럼 참여자가 셋 이상이면 그만큼 늘어납니다). 그런데 `TranscriptSegment.speaker` 가 `Literal["CUSTOMER", "AGENT"]` 로 닫혀 있어 `calls.get_transcript()` 가 `APIResponseValidationError` 를 냈습니다. **`segments` 는 리스트라 조각 하나가 응답 전체를 죽입니다.**
   - 옛 전사의 `AGENT`·`CUSTOMER` 도 그대로 받습니다. 새 `TranscriptSpeaker` 를 내보냅니다.
-  - ⚠️ **0.47.0 이 `Message.type`·`Message.status` 를 열면서 "이 어휘는 서버가 소유하므로 값이 하나 늘 때마다 같은 사고가 반복됩니다" 라고 적어 놓고, 바로 옆의 이 필드를 닫힌 채로 남겨 뒀습니다.** 같은 사고의 3회차입니다.
-- `Message.type` 의 자동완성에 `bms`(카카오 브랜드 메시지)를 채웠습니다. 어휘가 열려 있어 **예외는 나지 않던** 자리라 조회에는 영향이 없습니다.
+- **🔴 전사가 실패한 이유를 물으면 예외가 나던 것.** `TranscriptStatus.stage` 가 `download`·`runtime`·`trigger` 셋만 알았는데, 전사 파이프라인은 `transcription`·`recover` 도 내보내고 **영구 실패는 예외 객체의 속성을 그대로 싣습니다** — 즉 어휘가 코드로 열려 있습니다. 고객이 가장 답을 필요로 하는 순간에 던지던 자리입니다. 새 `TranscriptStage` 를 내보냅니다.
+- **`MessageStatus` 에서 `sending` 을 뺐습니다** — **서버가 한 번도 보낸 적 없는 값**입니다. 어휘를 손으로 관리하면 없는 값이 들어오고 있는 값이 빠진다는 증거라, 이번에 함께 정리했습니다. 열린 유니온이라 서버가 실제로 그 값을 보내도 파싱은 됩니다.
+
+### Added
+- `MessageType` 자동완성에 `bms`(카카오 브랜드 메시지). 어휘가 이미 열려 있어 **예외는 나지 않던** 자리라 조회에는 영향이 없습니다 — Node SDK 는 여기가 닫혀 있어 실제로 던졌고(0.37.1 에서 수정), 그래서 그쪽이 급했습니다.
 
 ## 0.48.0 (2026-09-03)
 

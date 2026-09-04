@@ -16,8 +16,12 @@ from .._models import BaseModel
 MessageType = Union[Literal["sms", "lms", "mms", "ata", "bms"], str]
 """메시지 유형. `ata` 는 카카오 알림톡, `bms` 는 카카오 브랜드 메시지. 서버가 값을 늘릴 수 있어 열려 있다."""
 
-MessageStatus = Union[Literal["queued", "sending", "sent", "failed", "received"], str]
-"""메시지 상태. 서버가 값을 늘릴 수 있어 열려 있다."""
+MessageStatus = Union[Literal["queued", "sent", "failed", "received"], str]
+"""메시지 상태. 서버가 값을 늘릴 수 있어 열려 있다.
+
+⚠️ 한때 여기 `sending` 이 있었는데 **서버가 한 번도 보낸 적 없는 값**이다 — 어휘를 손으로
+관리하면 없는 값이 들어오고 있는 값이 빠진다.
+"""
 
 
 class Message(BaseModel):

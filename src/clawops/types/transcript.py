@@ -5,17 +5,23 @@ from typing import List, Literal, Optional, Union
 
 from .._models import BaseModel
 
-# ⚠️ 닫힌 Literal 로 두지 않는다 — `MessageType` 과 같은 이유이고, 같은 방식으로 이미 한 번
-# 깨져 있었다. **2026-08 이후 전사는 서버가 `speaker_0`·`speaker_1`… 을 보낸다**(전환 통화처럼
+# ⚠️ 아래 둘 다 닫힌 Literal 로 두지 않는다 — `MessageType` 과 같은 이유이고, 이 응답에서만
+# 두 번 깨졌다. `segments` 는 리스트라 **조각 하나가 전사 응답 전체를 죽인다.**
+#
+# **2026-08 이후 전사는 서버가 화자를 `speaker_0`·`speaker_1`… 로 보낸다**(전환 통화처럼
 # 참여자가 셋 이상이면 그만큼 늘어난다). 그 이전 전사에는 `AGENT`·`CUSTOMER` 가 그대로 남아
-# 있으므로 **두 형식을 모두 받아야** 한다.
-#
-# ⛔ `segments` 가 리스트라 **조각 하나가 전사 응답 전체를 죽인다** — 실제로 최근 전사가
-#    전부 `get_transcript()` 에서 ValidationError 였다.
-#
-# 화자와 역할(AI/상담원/고객)의 연결은 보장되지 않는다.
+# 있으므로 **두 형식을 모두 받아야** 한다. 화자와 역할의 연결은 보장되지 않는다.
 TranscriptSpeaker = Union[Literal["CUSTOMER", "AGENT"], str]
 """화자 식별자. 서버가 형식을 바꿀 수 있어 열려 있다."""
+
+# ⛔ **실패 단계는 서버 코드가 만든다** — 전사 파이프라인이 `download`·`runtime`·`transcription`·
+#    `recover` 를 내보내고, 영구 실패는 예외 객체의 속성(`exc.stage`)을 그대로 싣는다.
+#    즉 어휘가 열려 있고, 서버 스펙의 enum 조차 그 스냅샷일 뿐이다.
+#
+# ⚠️ 여기가 닫혀 있으면 **전사가 실패했을 때 그 이유를 물으면 던진다** — 고객이 가장 답을
+#    필요로 하는 순간이다.
+TranscriptStage = Union[Literal["download", "runtime", "transcription", "trigger", "recover"], str]
+"""실패 단계. `trigger` 는 시스템 레벨 실패라 재요청할 수 있다."""
 
 
 class TranscriptSegment(BaseModel):
@@ -42,7 +48,7 @@ class TranscriptStatus(BaseModel):
     segment_count: Optional[int] = None
     segments: Optional[List[TranscriptSegment]] = None
     started_at: Optional[datetime] = None
-    stage: Optional[Literal["download", "runtime", "trigger"]] = None
+    stage: Optional[TranscriptStage] = None
     error: Optional[str] = None
 
 

@@ -32,12 +32,8 @@ from .recording import RecordingDownload
 from .shared import PaginationMeta
 from .sip import SipCredential, SipEndpoint
 from .summary import SummaryStatus
-from .transcript import (
-    TranscriptRequestAccepted,
-    TranscriptSegment,
-    TranscriptSpeaker,
-    TranscriptStatus,
-)
+from .transcript import TranscriptRequestAccepted, TranscriptSegment, TranscriptStatus
+from .transcript import TranscriptSpeaker, TranscriptStage
 from .webhook_log import WebhookLog
 
 __all__ = [
@@ -83,6 +79,7 @@ __all__ = [
     "TranscriptRequestAccepted",
     "TranscriptSegment",
     "TranscriptSpeaker",
+    "TranscriptStage",
     "TranscriptStatus",
     "WebhookLog",
 ]

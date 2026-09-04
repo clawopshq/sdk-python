@@ -185,7 +185,24 @@ class TestCallsTranscript:
             })
         )
         r = calls.get_transcript(self.CID)
-        assert [s.speaker for s in r.segments or []] == ["speaker_0", "speaker_1", "AGENT"]
+        assert r.segments and [s.speaker for s in r.segments] == ["speaker_0", "speaker_1", "AGENT"]
+
+    @respx.mock
+    def test_get_transcript_failed_stage_beyond_known(self, calls):
+        """실패 단계는 서버 코드가 만든다 — 영구 실패는 예외 객체의 속성을 그대로 싣는다.
+
+        ⛔ 여기가 닫혀 있으면 **전사가 실패했을 때 그 이유를 물으면 던진다.**
+        고객이 가장 답을 필요로 하는 순간이다.
+        """
+        respx.get(f"{BASE}{CALLS_PATH}/{self.CID}/transcript").mock(
+            return_value=httpx.Response(200, json={
+                "status": "failed",
+                "stage": "transcription",
+                "error": "transcription_failed",
+            })
+        )
+        r = calls.get_transcript(self.CID)
+        assert r.stage == "transcription"
 
     @respx.mock
     def test_get_transcript_pending(self, calls):
