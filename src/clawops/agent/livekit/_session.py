@@ -57,8 +57,12 @@ class LiveKitSession:
     직접 넘기면 통화 간에 그 객체를 공유하므로 동시통화 1건까지다.
     """
 
-    def __init__(self, create: CreateFn) -> None:
+    def __init__(self, create: CreateFn, *, audio_pause: bool = False) -> None:
         self._create = create
+        # 오디오 출력의 일시정지 능력(`_io.py` 모듈 docstring 「일시정지」). 켜면 LiveKit 이
+        # 오탐 끼어들기(잡음·기침)로 멈춘 안내를 `false_interruption_timeout` 뒤 되살린다.
+        # 끼어들기 동작이 달라지므로 기본은 꺼 둔다 — 호출자가 명시적으로 켠다.
+        self._audio_pause = audio_pause
 
         self._session: AgentSession[None] | None = None
         self._agent: Agent | None = None
@@ -183,7 +187,7 @@ class LiveKitSession:
         _validate(session, agent)
 
         self._input = ClawOpsAudioInput()
-        self._output = ClawOpsAudioOutput(target)
+        self._output = ClawOpsAudioOutput(target, pause=self._audio_pause)
 
         # ⚠️ TranscriptSynchronizer 는 필수다. room 없이는 이걸 안 씌우면
         # barge-in 시 synchronized_transcript 가 None 이라 LLM 컨텍스트에
