@@ -20,6 +20,28 @@ transport 를 AgentSession 에 물리기)를 푸는 LiveKit 자신의 코드다.
    **통째로 사라진다**.
 3. `on_playback_finished()` 는 세그먼트당 정확히 한 번, `flush()` 가 띄운
    태스크에서만 호출한다. `clear_buffer()` 에서 호출하면 재생 회계가 깨진다.
+
+## 일시정지(pause/resume) — 오탐 끼어들기에서 안내를 되살린다
+
+LiveKit 은 발신자 음성이 감지되면 안내를 **일시정지**하고, 정해진 시간 안에 실제 말(전사·턴
+커밋)이 없으면 **재개**한다(`resume_false_interruption`, 기본 2초). 이 싱크가 `can_pause`
+를 못 내면 LiveKit 은 그 기능을 통째로 끄고 매 통화 경고만 남긴다 — 회선 잡음·기침 한 번에
+안내가 영영 끊긴다(CASE-2026-000751).
+
+WebRTC 와 달리 우리 오디오는 이미 엔진(call-engine)의 페이서 큐에 세그먼트째 들어가 있어
+"보내기를 멈추는 것" 만으로는 소리가 안 멈춘다. 그래서:
+
+- `pause()` = 지금까지 들린 위치를 추정해 기억하고 엔진 큐를 `clear` 한다(즉시 정적).
+  이 세그먼트의 μ-law 는 전부 로컬에 남겨 둔다.
+- `resume()` = 기억한 위치(살짝 앞당겨서)부터 남은 바이트를 다시 보낸다. 추정이 늦은 쪽으로
+  틀리면 음절이 사라지고 이른 쪽이면 살짝 반복된다 — 반복이 낫다(:data:`_RESUME_REWIND_S`).
+- ⚠️ 엔진은 `clear` 를 받으면 **대기 중인 mark 를 즉시 되돌려 준다**(call-handler.js). 그걸
+  "재생 완료" 로 읽으면 세그먼트가 일시정지 중에 닫혀 버려 재개할 것이 없어진다. 그래서 mark
+  에 세대(:attr:`_mark_gen`)를 박고, pause 가 세대를 올려 옛 mark 를 무효로 만든다.
+  `_await_playout` 은 무효 mark 를 보면 재개를 기다렸다가 새 mark 를 다시 건다.
+- 들린 위치는 첫 바이트 송신 시각부터의 경과로 추정한다(끊김 시 `playback_position` 과 같은
+  근거). 엔진 프리롤(수십 ms)만큼 늦게 들리므로 경과는 실제보다 조금 크다 — 되감기가 그 오차도
+  덮는다.
 """
 
 from __future__ import annotations
@@ -55,6 +77,9 @@ _TAIL_PAD = os.environ.get("CLAWOPS_TAIL_PAD") == "1"
 
 _MARK_TIMEOUT_MARGIN = 10.0
 """mark 대기 timeout = 밀어넣은 오디오 길이 + 이 여유."""
+
+_RESUME_REWIND_S = 0.12
+"""재개 지점을 추정 위치보다 이만큼 앞당긴다(음절 유실보다 짧은 반복이 낫다)."""
 
 _SENTINEL = object()
 
@@ -100,19 +125,37 @@ class ClawOpsAudioOutput(io.AudioOutput):
     오디오를 다 내보낸 뒤 mark 를 에코해준다. prewarm 중(`_BufferingCall`)에는
     media_ws 가 없으므로 즉시 완료로 본다(실제로 아직 아무것도 재생되지 않지만,
     버퍼는 attach 시 전부 flush 되므로 "전부 재생됨"이 맞다).
+
+    ``pause=True`` 면 LiveKit 에 일시정지 능력을 알린다(모듈 docstring 「일시정지」).
+    기본은 False — 켜면 LiveKit 이 오탐 끼어들기 되살리기를 실제로 수행하므로 끼어들기
+    동작이 달라진다. 켜는 쪽(러너·에이전트)이 결정한다.
     """
 
-    def __init__(self, call: Any) -> None:
+    def __init__(self, call: Any, *, pause: bool = False) -> None:
         super().__init__(
             label="ClawOps",
             next_in_chain=None,
             sample_rate=SAMPLE_RATE,
-            capabilities=io.AudioOutputCapabilities(pause=False),
+            capabilities=io.AudioOutputCapabilities(pause=pause),
         )
         self._call = call
-        self._pushed_duration: float = 0.0
-        self._capture_start: float = 0.0
-        self._tail: bytes = b""
+        # ── 세그먼트 상태(flush 태스크가 닫을 때 리셋) ──
+        self._pushed_duration: float = 0.0  # 캡처된 오디오 총 길이(초)
+        self._seg = bytearray()  # 이 세그먼트의 μ-law 전체 — 재개 재전송용
+        self._sent = 0  # _seg 중 엔진으로 보낸 바이트 수
+        self._segment_closed = False  # flush() 가 불렸다(자투리까지 내보낸다)
+        # ── 재생 위치 추정 기준점: 기준 바이트 + 그 시각 ──
+        self._playing = False
+        self._origin_bytes = 0
+        self._origin_time = 0.0
+        # ── 일시정지(세그먼트를 넘어 유지된다 — LiveKit 은 싱크 수준 상태로 본다) ──
+        self._paused = False
+        self._pause_pos = 0  # 일시정지 시점의 추정 재생 위치(바이트)
+        self._resume_from = 0  # 재개 시 다시 보내기 시작할 바이트
+        self._mark_gen = 0  # pause 마다 올린다 — 옛 mark 무효화
+        self._resumed_ev = asyncio.Event()
+        self._send_lock = asyncio.Lock()
+        # ── 수명 ──
         self._flush_task: asyncio.Task[None] | None = None
         self._interrupted_ev = asyncio.Event()
         self._attached_ev = asyncio.Event()
@@ -126,8 +169,10 @@ class ClawOpsAudioOutput(io.AudioOutput):
         계산돼서 barge-in 시 절단 위치가 뒤로 밀린다.
         """
         self._call = call
-        if self._pushed_duration:
-            self._capture_start = time.monotonic()
+        if self._sent:
+            self._playing = True
+            self._origin_bytes = 0
+            self._origin_time = time.monotonic()
         self._attached_ev.set()
 
     # ── AudioOutput 구현 ────────────────────────────────────────
@@ -141,27 +186,21 @@ class ClawOpsAudioOutput(io.AudioOutput):
             await self._flush_task
 
         if not self._pushed_duration:
-            self._capture_start = time.monotonic()
             # ⚠️ 계약 2: 이걸 빼면 assistant 메시지가 히스토리에서 사라진다.
             self.on_playback_started(created_at=time.time())
 
         self._pushed_duration += frame.duration
-
-        # 이 프레임의 모든 청크는 한 통화로 보낸다 (attach 스왑 중 프레임 내 분할 방지).
-        call = self._call
-        ulaw = self._tail + pcm16_to_ulaw(bytes(frame.data))
-        off = 0
-        while off + FRAME_BYTES <= len(ulaw):
-            await call.send_audio(ulaw[off : off + FRAME_BYTES])
-            off += FRAME_BYTES
-        self._tail = ulaw[off:]
+        self._seg += pcm16_to_ulaw(bytes(frame.data))
+        await self._pump()
 
     def flush(self) -> None:
         super().flush()
         # 캡처된 세그먼트가 없으면 닫을 것도 없다.
         if self._pending_playback_count <= 0:
-            self._tail = b""
+            self._seg = bytearray()
+            self._sent = 0
             return
+        self._segment_closed = True
         # ⚠️ 이전 flush 태스크를 취소하지 않는다 — 취소하면 그 세그먼트의
         #    on_playback_finished 가 유실돼 프레임워크 wait_for_playout 이 영구 대기한다.
         #    대신 _flush_and_wait 이 이전 태스크를 먼저 await 해 직렬화한다.
@@ -171,15 +210,43 @@ class ClawOpsAudioOutput(io.AudioOutput):
     def clear_buffer(self) -> None:
         # ⚠️ 계약 3: 여기서 on_playback_finished 를 부르지 않는다.
         #    _flush_and_wait 이 _interrupted_ev 를 보고 한 번만 쏜다.
-        self._tail = b""
         if self._pushed_duration:
             self._interrupted_ev.set()
         # prewarm 중 _BufferingCall.clear_audio 는 버퍼를 비운다(실제 통화면 큐 flush).
         self._spawn(self._call.clear_audio())
 
+    def pause(self) -> None:
+        """재생을 멈춘다(엔진 큐 clear). 들린 위치를 기억해 두고 resume 에서 그 앞부터 다시 보낸다."""
+        super().pause()
+        if self._paused:
+            return
+        pos = self._estimate_played_bytes()  # ⚠️ _paused 를 세우기 전에 — 세운 뒤엔 멈춘 자리를 돌려준다
+        self._paused = True
+        self._mark_gen += 1  # 이 이후 엔진이 되돌려 주는 옛 mark 는 재생 완료가 아니다
+        self._pause_pos = pos
+        rewind = int(_RESUME_REWIND_S * SAMPLE_RATE)
+        self._resume_from = max(0, pos - rewind) // FRAME_BYTES * FRAME_BYTES
+        self._playing = False  # 재개 시 기준점을 새로 잡는다
+        if self._sent:
+            self._spawn(self._call.clear_audio())
+        log.debug(
+            "audio output paused",
+            extra={"played_ms": pos * 1000 // SAMPLE_RATE, "sent_bytes": self._sent},
+        )
+
+    def resume(self) -> None:
+        """멈춘 지점(살짝 앞)부터 남은 오디오를 다시 보낸다."""
+        super().resume()
+        if not self._paused:
+            return
+        self._paused = False
+        self._sent = min(self._resume_from, len(self._seg))
+        self._spawn(self._resend())
+
     def close(self) -> None:
         """세션 종료 시 남은 재생 태스크를 정리한다 (닫힌 통화 참조 방지)."""
-        self._interrupted_ev.set()  # prewarm 대기 중인 _flush_and_wait 을 깨운다
+        self._interrupted_ev.set()  # prewarm·일시정지 대기 중인 _flush_and_wait 을 깨운다
+        self._resumed_ev.set()
         if self._flush_task and not self._flush_task.done():
             self._flush_task.cancel()
         for task in list(self._bg_tasks):
@@ -204,6 +271,56 @@ class ClawOpsAudioOutput(io.AudioOutput):
         if ws is None or not ws.is_connected:
             return None
         return ws
+
+    def _estimate_played_bytes(self) -> int:
+        """지금까지 상대에게 들렸을 바이트 수(추정). 일시정지 중엔 멈춘 자리."""
+        if self._paused:
+            return self._pause_pos
+        if not self._playing:
+            return 0
+        elapsed = int((time.monotonic() - self._origin_time) * SAMPLE_RATE)
+        return max(0, min(self._sent, self._origin_bytes + elapsed))
+
+    async def _pump(self) -> None:
+        """_seg 의 아직 안 보낸 부분을 160바이트 프레임으로 보낸다.
+
+        세그먼트가 닫혔으면(flush 뒤) 자투리도 그대로 내보낸다 — 예전엔 여기서 무음으로
+        채워 160바이트를 맞췄는데 그게 발화 한가운데 0~19ms 짜리 구멍을 만들고 있었다
+        (실측 2026-08-19: 발화 중 갭이 전부 끝 위치 `mod 160 = 0`, 길이 160 미만).
+        「뒤에 더 오는가」는 큐를 들고 있는 엔진만 안다. 엔진은 뒤따르는 mark 를 세그먼트
+        끝 신호로 읽어 그 자리에서 채워 내보낸다.
+        """
+        async with self._send_lock:
+            if self._paused:
+                return
+            self._sent = min(self._sent, len(self._seg))
+            avail = len(self._seg) - self._sent
+            if self._segment_closed:
+                if avail and avail % FRAME_BYTES and _TAIL_PAD:
+                    self._seg += ULAW_SILENCE * (FRAME_BYTES - avail % FRAME_BYTES)
+                end = len(self._seg)
+            else:
+                end = self._sent + avail // FRAME_BYTES * FRAME_BYTES
+            if end <= self._sent:
+                return
+            if not self._playing:
+                self._playing = True
+                self._origin_bytes = self._sent
+                self._origin_time = time.monotonic()
+            # 이 호출의 모든 청크는 한 통화로 보낸다 (attach 스왑 중 분할 방지).
+            call = self._call
+            off = self._sent
+            while off < end:
+                chunk = bytes(self._seg[off : min(off + FRAME_BYTES, end)])
+                await call.send_audio(chunk)
+                off += len(chunk)
+            self._sent = end
+
+    async def _resend(self) -> None:
+        try:
+            await self._pump()
+        finally:
+            self._resumed_ev.set()
 
     async def _race_interrupt(self, awaitable: Any) -> bool:
         """`awaitable` 과 barge-in 중 먼저 오는 걸 기다린다. 반환: awaitable 이 이겼는가.
@@ -239,28 +356,15 @@ class ClawOpsAudioOutput(io.AudioOutput):
 
         # prev 가 자기 세그먼트를 닫은 뒤 남은 미완료 세그먼트가 없으면 종료.
         if self._pending_playback_count <= 0:
-            self._tail = b""
+            self._seg = bytearray()
+            self._sent = 0
+            self._segment_closed = False
             return
 
         interrupted = True
         try:
-            # 남은 자투리를 **그대로** 내보낸다.
-            #
-            # 예전엔 여기서 무음으로 채워 160바이트를 맞췄다. 그게 발화 한가운데
-            # 0~19ms 짜리 구멍을 만들고 있었다 — 이 시점의 우리는 뒤에 오디오가 더
-            # 오는지 모르는 채로 매번 세그먼트를 닫기 때문이다. 실측(2026-08-19):
-            # 실통화 녹음의 발화 중 갭이 11/11 · 27/27 모두 끝 위치 `mod 160 = 0`,
-            # 길이는 전부 160 미만, 경계 진폭 3132 — 우연히 정렬될 수 없는 지문이다.
-            #
-            # 「뒤에 더 오는가」는 큐를 들고 있는 엔진만 안다. 그래서 판단을 그쪽으로
-            # 넘긴다. 엔진은 바로 아래 `_await_playout` 의 mark 를 세그먼트 끝 신호로
-            # 읽어 그 자리에서 채워 내보낸다(못 읽으면 40ms 안에 안전판이 닫는다).
-            tail, self._tail = self._tail, b""
-            if tail:
-                if _TAIL_PAD:
-                    tail += ULAW_SILENCE * (FRAME_BYTES - len(tail))
-                await self._call.send_audio(tail)
-
+            # 남은 자투리를 **그대로** 내보낸다(일시정지 중이면 재개 때 _resend 가 보낸다).
+            await self._pump()
             interrupted = await self._await_playout()
         except Exception:
             # WS 사망 등 전송 오류 — interrupted(=True) 로 처리하고 프레임워크로
@@ -271,11 +375,18 @@ class ClawOpsAudioOutput(io.AudioOutput):
             # ⚠️ 계약 3: 세그먼트당 정확히 한 번 — 취소되더라도 반드시 emit 한다.
             #    (안 그러면 segment count 가 어긋나 wait_for_playout 이 영구 대기한다.)
             if interrupted:
-                played = min(max(0.0, time.monotonic() - self._capture_start), self._pushed_duration)
+                played = min(self._estimate_played_bytes() / SAMPLE_RATE, self._pushed_duration)
             else:
                 played = self._pushed_duration
             self.on_playback_finished(playback_position=played, interrupted=interrupted)
             self._pushed_duration = 0.0
+            self._seg = bytearray()
+            self._sent = 0
+            self._segment_closed = False
+            self._playing = False
+            # 일시정지 상태 자체는 유지한다(LiveKit 이 resume 을 따로 부른다) — 위치만 리셋.
+            self._pause_pos = 0
+            self._resume_from = 0
             self._interrupted_ev.clear()
 
     async def _await_playout(self) -> bool:
@@ -293,14 +404,29 @@ class ClawOpsAudioOutput(io.AudioOutput):
                 # attach 됐는데도 WS 가 없다 (이미 종료된 통화 등) — fence 불가.
                 return self._interrupted_ev.is_set()
 
-        # send_mark 는 WS 로 즉시 나가지만 send_audio 는 로컬 큐에 쌓인다.
-        # flush() 로 큐를 비우지 않으면 mark 가 오디오를 추월한다 (_graceful_hangup 과 동일).
-        await ws.flush()
+        while True:
+            if self._paused:
+                # 일시정지 중 — 재개(또는 끊김)를 기다린 뒤 다시 mark 를 건다.
+                self._resumed_ev.clear()
+                if self._paused and not await self._race_interrupt(self._resumed_ev.wait()):
+                    return True
+                continue
 
-        mark_name = f"lk-{int(time.monotonic() * 1e6)}"
-        await ws.send_mark(mark_name)
+            gen = self._mark_gen
+            mark_name = f"lk-{gen}-{int(time.monotonic() * 1e6)}"
+            # send_mark 는 WS 로 즉시 나가지만 send_audio 는 로컬 큐에 쌓인다.
+            # flush() 로 큐를 비우지 않으면 mark 가 오디오를 추월한다 (_graceful_hangup 과 동일).
+            # 락은 재개 재전송(_resend)이 끝난 뒤에 mark 가 서게 한다.
+            async with self._send_lock:
+                await ws.flush()
+                await ws.send_mark(mark_name)
 
-        # mark echo(재생 완료)와 barge-in 중 먼저 오는 것을 기다린다.
-        return not await self._race_interrupt(
-            ws.wait_for_mark(mark_name, timeout=self._pushed_duration + _MARK_TIMEOUT_MARGIN)
-        )
+            # mark echo(재생 완료)와 barge-in 중 먼저 오는 것을 기다린다.
+            if not await self._race_interrupt(
+                ws.wait_for_mark(mark_name, timeout=self._pushed_duration + _MARK_TIMEOUT_MARGIN)
+            ):
+                return True
+            if gen != self._mark_gen or self._paused:
+                # pause 의 clear 가 되돌려 준 옛 mark — 재생 완료가 아니다. 재개 후 다시 건다.
+                continue
+            return False

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.52.0 (2026-09-06)
+
+### Added
+- **LiveKit 오디오 출력 일시정지(pause/resume).** `LiveKitSession(create, audio_pause=True)` 로
+  켜면 `ClawOpsAudioOutput` 이 LiveKit 에 `can_pause` 를 알립니다. 그러면 LiveKit 의
+  `resume_false_interruption`(기본 2초)이 실제로 동작합니다 — 회선 잡음·기침 한 번에 안내가
+  끊겼다가, 정해진 시간 안에 실제 말이 없으면 **멈춘 자리부터 이어서** 재생됩니다. 지금까지는
+  이 싱크가 일시정지를 못 내서 LiveKit 이 기능을 끄고 통화마다 경고만 남겼습니다.
+  - pause = 지금까지 들린 위치를 기억하고 엔진 큐를 `clear`(즉시 정적), resume = 그 위치를
+    0.12초 되감아 남은 오디오를 다시 보냅니다(음절 유실보다 짧은 반복이 낫습니다).
+  - 엔진이 `clear` 에 대기 중인 mark 를 즉시 되돌려 주는 것을 "재생 완료" 로 읽지 않도록
+    mark 에 세대를 박았습니다.
+  - **기본은 꺼짐**(`audio_pause=False`) — 켜면 끼어들기 동작이 달라지므로 호출자가 정합니다.
+
 ## 0.51.0 (2026-09-06)
 
 ### Added
