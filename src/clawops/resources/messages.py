@@ -75,19 +75,27 @@ Returns:
 """
 
 
-def _template_block(p: KakaoSendParam | BrandSendParam | None) -> dict[str, Any] | None:
-    """알림톡·브랜드의 템플릿 지정을 서버 표기(PascalCase)로 옮긴다.
+def _send_block(p: KakaoSendParam | BrandSendParam | None) -> dict[str, Any] | None:
+    """알림톡·브랜드의 발송 지정을 서버 표기(PascalCase)로 옮긴다.
 
-    두 채널의 입력 모양이 같아서 한 곳에 둔다 — 서버가 ``Variables`` 키 이름을 바꾸면
-    여기만 고치면 된다. ⚠️ ``strip_not_given`` 은 얕아서 중첩은 손으로 조립해야 한다.
+    두 채널이 **한 함수를 쓴다** — 알림톡엔 자유형이 없어 ``Free`` 가 언제나 없고,
+    ``strip_not_given`` 이 그걸 떨군다. 갈라 두면 서버가 ``Variables`` 키 이름을 바꿀 때
+    두 곳을 고쳐야 한다.
+
+    ⛔ **네 칸을 그대로 옮긴다 — 여기서 템플릿형/자유형을 고르지 않는다.** ``free`` 가
+       있으면 ``TemplateId`` 를 떨구는 식으로 짜면, 둘 다 실은 호출자가 400 대신
+       **자기가 안 시킨 자유형이 나간 것**을 받는다. 배타 판정은 서버 한 곳이다.
+
+    ⚠️ ``strip_not_given`` 은 얕다. ``Free`` 안쪽은 손대지 않는다 — 판정은 서버 표가 한다.
     """
     if p is None:
         return None
     return strip_not_given(
         {
             "ChannelId": p["channel_id"],
-            "TemplateId": p["template_id"],
+            "TemplateId": p.get("template_id"),
             "Variables": p.get("variables"),
+            "Free": p.get("free"),
         }
     )
 
@@ -127,6 +135,23 @@ def _build_create_body(
         # 400 kakao_fallback_not_allowed
         if brand is not None and fallback is not None:
             raise TypeError("브랜드 메시지에는 fallback 을 쓸 수 없습니다. 대체발송이 없습니다.")
+        if brand is not None:
+            # ⚠️ **서버와 같은 판정식**이다(`Boolean(templateId) === (free !== undefined)`).
+            #    `"free" in brand` 로 쓰면 `free=None` 이 서버와 갈린다.
+            has_template = bool(brand.get("template_id"))
+            has_free = brand.get("free") is not None
+            if has_template == has_free:
+                raise TypeError(
+                    "brand 에는 template_id(템플릿형) 또는 free(자유형) 중 하나만 지정해야 "
+                    "합니다. 둘 다 주면 어느 쪽으로 나갈지 정해 줄 수 없고, 둘 다 없으면 "
+                    "보낼 말풍선이 없습니다."
+                )
+            # 자유형에는 치환해 줄 템플릿이 없다 — `#{…}` 가 그대로 렌더된다.
+            if has_free and brand.get("variables") is not None:
+                raise TypeError(
+                    "자유형(brand.free)에는 variables 를 쓸 수 없습니다. "
+                    "값을 채우려면 템플릿을 등록해 template_id 로 보내세요."
+                )
     else:
         if fallback is not None:
             raise TypeError("fallback 은 알림톡 전용입니다. kakao 와 함께 지정하세요.")
@@ -144,8 +169,8 @@ def _build_create_body(
             "Type": type,
             "Subject": subject,
             "MediaUrl": media_url,
-            "Kakao": _template_block(kakao),
-            "Brand": _template_block(brand),
+            "Kakao": _send_block(kakao),
+            "Brand": _send_block(brand),
             "Fallback": None
             if fallback is None
             else strip_not_given(

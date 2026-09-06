@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import mimetypes
+from typing import Any
+
 from .._resource import AsyncAPIResource, SyncAPIResource
 from .._utils import strip_not_given
 from ..pagination import AsyncPage, SyncPage
 from ..types.kakao import (
+    BrandBubbleType,
+    KakaoBrandImage,
+    KakaoBrandImageUpload,
     KakaoBrandTemplate,
     KakaoChannel,
     KakaoChannelCategoryList,
@@ -148,6 +154,47 @@ Raises:
     BadRequestError: channel_id 누락 또는 페이지 입력 오류 (VALIDATION).
     NotFoundError: 이 계정에 연결된 채널이 아님.
 """
+
+_BRAND_IMAGES_DOC = """자유형 말풍선에 실을 이미지.
+
+⭐ **업로드 한 번, 발송 여러 번.** 캠페인 하나에 수천 건이 같은 그림을 쓰므로 받은 ``id`` 를
+재사용합니다 — 발송마다 다시 올릴 필요가 없습니다.
+
+⚠️ **규격이 말풍선 유형마다 다릅니다.** 업로드할 때 준 ``bubble_type`` 과 다른 유형에 쓰면
+카카오가 발송 단계에서 거절합니다.
+"""
+
+_BRAND_IMAGES_UPLOAD_DOC = """이미지를 올리고 발송에 쓸 ``id`` 를 받습니다.
+
+    image = client.kakao.brand_images.upload(
+        file=open("banner.png", "rb").read(),
+        filename="banner.png",
+        bubble_type="WIDE",
+    )
+    client.messages.create(
+        to="01012345678", from_="07012345678",
+        brand={"channel_id": channel_id,
+               "free": {"chatBubbleType": "WIDE", "content": "신메뉴가 나왔어요.",
+                        "imageId": image.id}},
+    )
+
+⚠️ ``TEXT`` 는 이미지 자리가 없어 ``400`` 입니다.
+
+⚠️ **상한은 5MB 입니다.** 넘으면 ``400``, 10MB 를 넘으면 업로드 검증기가 먼저 끊어
+``413`` 이고 **``code`` 가 없습니다** — 즉 "너무 크다" 가 두 모양으로 옵니다.
+
+Args:
+    file: 이미지 바이트.
+    filename: 원본 파일 이름. 목록에서 사람이 알아볼 유일한 단서입니다.
+    bubble_type: 이 이미지를 쓸 말풍선 유형.
+    slot: 와이드리스트형의 작은 항목이면 ``"sub"``. 기본은 ``"main"``.
+"""
+
+_BRAND_IMAGES_LIST_DOC = """올려 둔 이미지를 최신순으로 조회합니다.
+
+**``id`` 를 잃었을 때 되찾는 경로입니다** — 없으면 같은 그림을 다시 올리는 수밖에 없습니다.
+"""
+
 
 _BRAND_TEMPLATES_DOC = """브랜드 메시지 템플릿 리소스.
 
@@ -366,6 +413,76 @@ class KakaoBrandTemplates(SyncAPIResource):
     list.__doc__ = _BRAND_TEMPLATES_LIST_DOC
 
 
+def _page_query(*, page: int | None, page_size: int | None) -> dict[str, Any]:
+    """쪽 나눔만 받는 목록 쿼리."""
+    return strip_not_given({"page": page, "pageSize": page_size})
+
+
+def _brand_image_file(file: bytes, filename: str) -> dict[str, Any]:
+    """httpx 의 multipart 파일 칸. 서버가 `image` 필드로 받는다.
+
+    MIME 은 파일 이름에서 유도한다 — 서버가 확장자·매직바이트로 다시 보므로 여기서
+    틀려도 안전하지만, 맞게 실어 두면 프록시·로그에서 무엇이 오갔는지 읽힌다.
+    """
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return {"image": (filename, file, content_type)}
+
+
+def _brand_image_fields(*, bubble_type: BrandBubbleType, slot: str | None) -> dict[str, Any]:
+    """함께 실리는 폼 필드.
+
+    ⚠️ **문자열로 보낸다.** multipart 는 값이 전부 문자열로 도착하고, 서버도 그 전제로
+       판정한다(스펙이 enum 으로 좁히지 않는 이유).
+    """
+    return strip_not_given({"bubbleType": bubble_type, "slot": slot})
+
+
+class KakaoBrandImages(SyncAPIResource):
+    __doc__ = _BRAND_IMAGES_DOC
+
+    @property
+    def _path(self) -> str:
+        return f"{self._base_path}/kakao/brand-images"
+
+    def upload(
+        self,
+        *,
+        file: bytes,
+        filename: str,
+        bubble_type: BrandBubbleType,
+        slot: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> KakaoBrandImageUpload:
+        return self._client._post(
+            self._path,
+            body=_brand_image_fields(bubble_type=bubble_type, slot=slot),
+            files=_brand_image_file(file, filename),
+            cast_to=KakaoBrandImageUpload,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    upload.__doc__ = _BRAND_IMAGES_UPLOAD_DOC
+
+    def list(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> SyncPage[KakaoBrandImage]:
+        return self._client._get_page(
+            self._path, cast_to=KakaoBrandImage,
+            query=_page_query(page=page, page_size=page_size),
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    list.__doc__ = _BRAND_IMAGES_LIST_DOC
+
+
 class Kakao(SyncAPIResource):
     __doc__ = _KAKAO_DOC
 
@@ -380,6 +497,10 @@ class Kakao(SyncAPIResource):
     @property
     def brand_templates(self) -> KakaoBrandTemplates:
         return KakaoBrandTemplates(client=self._client, account_id=self._account_id)
+
+    @property
+    def brand_images(self) -> KakaoBrandImages:
+        return KakaoBrandImages(client=self._client, account_id=self._account_id)
 
     def channel_categories(
         self,
@@ -545,6 +666,52 @@ class AsyncKakaoBrandTemplates(AsyncAPIResource):
     list.__doc__ = _BRAND_TEMPLATES_LIST_DOC
 
 
+class AsyncKakaoBrandImages(AsyncAPIResource):
+    __doc__ = _BRAND_IMAGES_DOC
+
+    @property
+    def _path(self) -> str:
+        return f"{self._base_path}/kakao/brand-images"
+
+    async def upload(
+        self,
+        *,
+        file: bytes,
+        filename: str,
+        bubble_type: BrandBubbleType,
+        slot: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> KakaoBrandImageUpload:
+        return await self._client._post(
+            self._path,
+            body=_brand_image_fields(bubble_type=bubble_type, slot=slot),
+            files=_brand_image_file(file, filename),
+            cast_to=KakaoBrandImageUpload,
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    upload.__doc__ = _BRAND_IMAGES_UPLOAD_DOC
+
+    async def list(
+        self,
+        *,
+        page: int | None = None,
+        page_size: int | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_query: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> AsyncPage[KakaoBrandImage]:
+        return await self._client._get_page(
+            self._path, cast_to=KakaoBrandImage,
+            query=_page_query(page=page, page_size=page_size),
+            extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
+        )
+
+    list.__doc__ = _BRAND_IMAGES_LIST_DOC
+
+
 class AsyncKakao(AsyncAPIResource):
     __doc__ = _KAKAO_DOC
 
@@ -559,6 +726,10 @@ class AsyncKakao(AsyncAPIResource):
     @property
     def brand_templates(self) -> AsyncKakaoBrandTemplates:
         return AsyncKakaoBrandTemplates(client=self._client, account_id=self._account_id)
+
+    @property
+    def brand_images(self) -> AsyncKakaoBrandImages:
+        return AsyncKakaoBrandImages(client=self._client, account_id=self._account_id)
 
     async def channel_categories(
         self,

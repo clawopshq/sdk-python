@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from typing_extensions import Required, TypedDict
 
@@ -100,12 +100,11 @@ class KakaoMessageCreateParams(_MessageCreateBaseParams, total=False):
     """생략해도 됩니다. 명시한다면 ``"ata"`` 여야 합니다."""
 
 
-class BrandSendParam(TypedDict, total=False):
-    """카카오 브랜드 메시지 발송 지정.
+class BrandTemplateSendParam(TypedDict, total=False):
+    """브랜드 메시지 — **템플릿형**. 구조는 등록한 템플릿이 정하고 요청은 값만 채웁니다.
 
-    이 항목을 실으면 브랜드 메시지입니다. ID 는 ``client.kakao.channels.list()`` /
-    ``client.kakao.brand_templates.list()`` 로 얻습니다 — 알림톡 템플릿과 **다른 표**라
-    ``templates`` 가 아닙니다.
+    ID 는 ``client.kakao.channels.list()`` / ``client.kakao.brand_templates.list()`` 로
+    얻습니다 — 알림톡 템플릿과 **다른 표**라 ``templates`` 가 아닙니다.
     """
 
     channel_id: Required[Annotated[str, PropertyInfo(alias="ChannelId")]]
@@ -120,6 +119,44 @@ class BrandSendParam(TypedDict, total=False):
     빠지면 ``400 kakao_variable_missing``, 템플릿에 없는 변수를 주면
     ``400 kakao_variable_unknown`` 입니다. 요구 목록은 템플릿의 ``variables`` 에 있습니다.
     """
+
+
+class BrandFreeSendParam(TypedDict, total=False):
+    """브랜드 메시지 — **자유형**. 말풍선을 요청이 직접 들고 갑니다.
+
+    템플릿을 등록하지 않아도 되고, 종료된 친구톡을 대신하는 방식입니다.
+
+    ⛔ **변수를 쓸 수 없습니다.** 치환해 줄 템플릿이 없어 ``#{…}`` 가 그대로 톡에 렌더되므로
+       서버가 ``400`` 으로 막습니다. TypedDict 가 닫혀 있어 ``variables`` 키는 타입에서도
+       걸립니다. 값을 채우려면 템플릿을 등록해 ``template_id`` 로 보내십시오.
+    """
+
+    channel_id: Required[Annotated[str, PropertyInfo(alias="ChannelId")]]
+    """ClawOps 채널 리소스 ID (채널 목록의 ``id``). 카카오 검색용 ID 가 아닙니다."""
+
+    free: Required[Annotated[dict[str, Any], PropertyInfo(alias="Free")]]
+    """말풍선 몸통. **불투명 오브젝트입니다 — SDK 는 안을 검사하지 않습니다.**
+
+    ⛔ 칸마다 타이핑하지 않는 것이 의도입니다. 말풍선 규격표는 서버에 한 벌만 있고, SDK 가
+       사본을 들면 카카오가 칸을 늘린 날 **SDK 가 조용히 깎습니다.** 잘못된 몸통은
+       ``400`` 으로 돌아오고 무엇이 잘못됐는지 본문이 알려 줍니다.
+
+    ``chatBubbleType`` 이 규격을 정합니다. 이미지가 필요한 유형은
+    ``client.kakao.brand_images.upload()`` 로 먼저 올리고 받은 ``id`` 를 ``imageId`` 에
+    넣습니다.
+    """
+
+
+BrandSendParam = Union[BrandTemplateSendParam, BrandFreeSendParam]
+"""브랜드 메시지 발송 지정.
+
+**템플릿형(``template_id``)과 자유형(``free``)은 정확히 하나만** 성립합니다 — 둘 다 실으면
+어느 쪽으로 나갈지 정해 드릴 수 없고, 둘 다 없으면 보낼 말풍선이 없습니다. 서버도
+``400 invalid_input`` 입니다.
+
+⛔ **한 TypedDict 로 합쳐 optional 로 두지 마십시오.** 키 집합이 갈려 있어야 mypy 가 잡습니다 —
+합치면 ``{"channel_id": …}`` 만 준 오타가 타입을 통과해 **운영 트래픽의 런타임 400** 이 됩니다.
+"""
 
 
 class BrandMessageCreateParams(_MessageCreateBaseParams, total=False):

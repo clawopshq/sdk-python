@@ -96,6 +96,28 @@ if TYPE_CHECKING:
         "to": "010", "from_": "070", "kakao": _KAKAO, "brand": _BRAND,
     }
 
+    # ── 브랜드 자유형 ─────────────────────────────────────────────────────────
+    # ⭐ 통과해야 하는 것. 음수만 있으면 "전부 거절" 하는 타입도 초록이다.
+    _BRAND_FREE: BrandSendParam = {
+        "channel_id": "clx9kak0001",
+        "free": {"chatBubbleType": "TEXT", "content": "안녕하세요"},
+    }
+    _brand_free: MessageCreateParams = {"to": "010", "from_": "070", "brand": _BRAND_FREE}
+
+    # ⛔ 템플릿형과 자유형은 **정확히 하나만** 성립한다(서버: 400 invalid_input).
+    #    TypedDict 유니온의 키 집합이 닫혀 있어 양쪽 모두에서 어긋난다 —
+    #    템플릿형엔 `free` 가 없고, 자유형엔 `template_id` 가 없다.
+    _brand_both: BrandSendParam = {  # type: ignore[assignment]
+        "channel_id": "c", "template_id": "t", "free": {"chatBubbleType": "TEXT"},
+    }
+    _brand_neither: BrandSendParam = {"channel_id": "c"}  # type: ignore[assignment]
+    # ⛔ 자유형에는 치환해 줄 템플릿이 없다 — `#{…}` 가 그대로 렌더된다.
+    _brand_free_vars: BrandSendParam = {  # type: ignore[assignment]
+        "channel_id": "c",
+        "free": {"chatBubbleType": "TEXT"},
+        "variables": {"고객명": "홍길동"},
+    }
+
     # ── 목록 필터 ─────────────────────────────────────────────
     _list_ata: MessageListParams = {"type": "ata", "number": "07052358010"}
     _list_bms: MessageListParams = {"type": "bms"}

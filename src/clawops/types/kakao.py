@@ -139,6 +139,36 @@ class KakaoBrandTemplate(BaseModel):
     updated_at: datetime
 
 
+class KakaoBrandImageUpload(BaseModel):
+    """이미지 업로드 응답.
+
+    ⭐ ``id`` 하나뿐입니다 — **벤더 파일 식별자는 내보내지 않습니다.** 그 값이 우리 테넌트에
+    묶여 있지 않아, 노출하면 남의 이미지를 실어 보낼 수 있기 때문입니다.
+    """
+
+    id: str
+
+
+class KakaoBrandImage(BaseModel):
+    """자유형 말풍선에 실을 이미지.
+
+    Attributes:
+        id: **ClawOps 리소스 ID.** 벤더 파일 식별자가 아닙니다 — 발송의
+            ``brand["free"]["imageId"]`` 에 이 값을 넣으면 서버가 벤더 값으로 바꿔 보냅니다.
+        bubble_type: 업로드할 때 지정한 말풍선 유형. 규격이 유형마다 달라 **다른 유형에는
+            재사용할 수 없습니다** — 그 유형으로 다시 올려야 합니다.
+        slot: ``"main"`` 또는 ``"sub"``. 서브는 와이드리스트형에만 있습니다(메인 2:1, 서브 1:1).
+        name: 업로드한 원본 파일 이름.
+        created_at: 업로드 시각.
+    """
+
+    id: str
+    bubble_type: BrandBubbleType
+    slot: str
+    name: Optional[str] = None
+    created_at: datetime
+
+
 class KakaoChannelCategory(BaseModel):
     """채널 업종 카테고리.
 

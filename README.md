@@ -490,6 +490,62 @@ print(msg.type)  # 'bms'
 ⚠️ 단가가 알림톡보다 훨씬 높고 **말풍선 유형에 따라 갈립니다** — 템플릿의 `chat_bubble_type`
 이 그 축입니다. `content` 는 유형에 따라 `None` 일 수 있습니다(본문이 담기는 자리가 다릅니다).
 
+#### 자유형 — 템플릿 없이 보내기
+
+`template_id` 대신 `free` 에 말풍선을 실으면 **템플릿을 등록하지 않고** 보냅니다. 종료된
+친구톡을 대신하는 방식입니다.
+
+```python
+client.messages.create(
+    to="01012345678",
+    from_="07052358010",
+    brand={
+        "channel_id": channel_id,
+        "free": {
+            "chatBubbleType": "TEXT",
+            "content": "이번 주 신메뉴가 나왔어요.",
+            "buttons": [{"name": "메뉴 보기", "linkType": "WL", "linkMobile": "https://example.com"}],
+        },
+    },
+)
+```
+
+`template_id` 와 `free` 는 **정확히 하나만** 실을 수 있습니다 — 둘 다 주거나 둘 다 빼면
+mypy 가 잡고, 타입을 쓰지 않으면 `TypeError` 입니다.
+
+⛔ **자유형에는 변수를 쓸 수 없습니다.** 치환해 줄 템플릿이 없어 `#{이름}` 이 그대로 톡에
+렌더되므로 서버가 막습니다. 값을 채우려면 템플릿을 등록해 `template_id` 로 보내십시오.
+
+⚠️ `free` 안쪽은 **SDK 가 검사하지 않습니다.** 말풍선 규격표는 서버에 한 벌만 두는 것이
+의도입니다 — SDK 가 사본을 들면 카카오가 칸을 늘린 날 SDK 가 조용히 깎습니다.
+
+⚠️ 검수를 거치지 않으므로 **여기 실은 버튼 링크가 그대로 톡에 렌더됩니다.**
+
+#### 자유형에 이미지 넣기
+
+```python
+image = client.kakao.brand_images.upload(
+    file=open("banner.png", "rb").read(),
+    filename="banner.png",
+    bubble_type="WIDE",
+)
+
+client.messages.create(
+    to="01012345678",
+    from_="07052358010",
+    brand={
+        "channel_id": channel_id,
+        "free": {"chatBubbleType": "WIDE", "content": "신메뉴가 나왔어요.", "imageId": image.id},
+    },
+)
+```
+
+**한 번 올린 이미지는 여러 발송에 재사용합니다.** ⚠️ 규격이 말풍선 유형마다 달라, 올릴 때 준
+`bubble_type` 과 다른 유형에 쓰면 카카오가 발송 단계에서 거절합니다. 와이드리스트형의 작은
+항목만 `slot="sub"` 를 씁니다.
+
+`id` 를 잃었으면 `client.kakao.brand_images.list()` 로 되찾습니다.
+
 ### 멀티 계정 접근
 
 ```python
