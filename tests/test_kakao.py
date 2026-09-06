@@ -357,3 +357,66 @@ class TestAsyncKakao:
         }))
         cats = await async_kakao.channel_categories()
         assert cats.data[0].name == "고객센터"
+
+
+class TestBrandImages:
+    """자유형에 실을 이미지 — 업로드는 multipart 다."""
+
+    @respx.mock
+    def test_upload_sends_multipart(self, kakao):
+        route = respx.post(f"{BASE}/v1/accounts/{ACCOUNT}/kakao/brand-images").mock(
+            return_value=httpx.Response(201, json={"id": "cmtn8o4vb000a"})
+        )
+
+        result = kakao.brand_images.upload(
+            file=b"\x89PNG", filename="banner.png", bubble_type="WIDE"
+        )
+        assert result.id == "cmtn8o4vb000a"
+
+        request = route.calls[0].request
+        # ⛔ boundary 는 httpx 가 붙인다. 우리가 application/json 을 남겨 두면 서버가 본문을
+        #    파싱하지 못하고, 그 실패는 "왜 파일이 안 왔지" 로만 드러난다.
+        assert request.headers["content-type"].startswith("multipart/form-data")
+
+        body = request.content.decode("utf-8", errors="replace")
+        assert 'name="bubbleType"' in body
+        assert "WIDE" in body
+        assert 'filename="banner.png"' in body
+        # slot 을 안 주면 필드 자체가 없다 — 서버 기본값(main)에 맡긴다.
+        assert 'name="slot"' not in body
+
+    @respx.mock
+    def test_upload_carries_slot(self, kakao):
+        route = respx.post(f"{BASE}/v1/accounts/{ACCOUNT}/kakao/brand-images").mock(
+            return_value=httpx.Response(201, json={"id": "cmtn8o54u000b"})
+        )
+        kakao.brand_images.upload(
+            file=b"x", filename="sub.png", bubble_type="WIDE_ITEM_LIST", slot="sub"
+        )
+        body = route.calls[0].request.content.decode("utf-8", errors="replace")
+        # ⚠️ 값까지 본다 — `"sub" in body` 는 파일 이름(sub.png)만으로도 참이라 공허하다.
+        assert 'name="slot"\r\n\r\nsub' in body
+
+    @respx.mock
+    def test_list_parses(self, kakao):
+        respx.get(f"{BASE}/v1/accounts/{ACCOUNT}/kakao/brand-images").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "cmtn8o4vb000a",
+                            "bubbleType": "WIDE",
+                            "slot": "main",
+                            "name": "banner.png",
+                            "createdAt": "2026-09-06T09:07:07.150Z",
+                        }
+                    ],
+                    "meta": {"page": 0, "pageSize": 20, "total": 1},
+                },
+            )
+        )
+        page = kakao.brand_images.list()
+        assert page.data[0].id == "cmtn8o4vb000a"
+        assert page.data[0].bubble_type == "WIDE"
+        assert page.data[0].name == "banner.png"

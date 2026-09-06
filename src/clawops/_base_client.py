@@ -47,6 +47,24 @@ def _validate_base_url(url: str) -> str:
     )
 
 
+def _body_kwargs(
+    body: dict[str, Any] | None,
+    files: dict[str, Any] | None,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    """본문을 httpx 인자로 옮긴다. 파일이 있으면 multipart 다.
+
+    ⛔ multipart 는 boundary 가 붙은 Content-Type 을 **httpx 가 만든다.** 기본값
+       (application/json)을 남겨 두면 그게 이기고 서버는 본문을 파싱하지 못하는데,
+       그 실패는 "왜 파일이 안 왔지" 로만 드러난다. 그래서 헤더를 지우는 것과 본문을
+       옮기는 것을 **한 곳에 묶었다** — 떨어져 있으면 한쪽만 고치는 날이 온다.
+    """
+    if not files:
+        return {"json": body}
+    headers.pop("Content-Type", None)
+    return {"data": body, "files": files}
+
+
 class SyncAPIClient:
     """동기 HTTP 클라이언트 베이스. httpx.Client를 래핑하며 인증, 재시도, 타임아웃, 에러 매핑을 처리합니다."""
 
@@ -102,11 +120,13 @@ class SyncAPIClient:
         *,
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> httpx.Response:
         headers = self._build_headers(extra_headers)
+        body_kwargs = _body_kwargs(body, files, headers)
 
         params = query.copy() if query else {}
         if extra_query:
@@ -123,7 +143,7 @@ class SyncAPIClient:
                 response = self._client.request(
                     method=method,
                     url=path,
-                    json=body,
+                    **body_kwargs,
                     params=params if params else None,
                     headers=headers,
                     timeout=req_timeout,
@@ -158,13 +178,14 @@ class SyncAPIClient:
         *,
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         cast_to: type[_T] | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> _T | None:
         response = self._send(
-            method, path, body=body, query=query,
+            method, path, body=body, query=query, files=files,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
         if response.status_code == 204 or cast_to is None:
@@ -193,10 +214,11 @@ class SyncAPIClient:
         assert result is not None
         return result
 
-    def _post(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+    def _post(self, path: str, *, body: dict[str, Any] | None = None,
+              files: dict[str, Any] | None = None, cast_to: type[_T],
               extra_headers: dict[str, str] | None = None, extra_query: dict[str, object] | None = None,
               timeout: float | httpx.Timeout | None = None) -> _T:
-        result = self._request("POST", path, body=body, cast_to=cast_to,
+        result = self._request("POST", path, body=body, files=files, cast_to=cast_to,
                                extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
         assert result is not None
         return result
@@ -342,6 +364,7 @@ class AsyncAPIClient:
         *,
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
         timeout: float | httpx.Timeout | None = None,
@@ -349,6 +372,7 @@ class AsyncAPIClient:
         import asyncio
 
         headers = self._build_headers(extra_headers)
+        body_kwargs = _body_kwargs(body, files, headers)
         params = query.copy() if query else {}
         if extra_query:
             params.update(extra_query)
@@ -362,7 +386,7 @@ class AsyncAPIClient:
         while True:
             try:
                 response = await self._client.request(
-                    method=method, url=path, json=body,
+                    method=method, url=path, **body_kwargs,
                     params=params if params else None,
                     headers=headers, timeout=req_timeout,
                 )
@@ -396,13 +420,14 @@ class AsyncAPIClient:
         *,
         body: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         cast_to: type[_T] | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_query: dict[str, object] | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> _T | None:
         response = await self._send(
-            method, path, body=body, query=query,
+            method, path, body=body, query=query, files=files,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
         if response.status_code == 204 or cast_to is None:
@@ -431,10 +456,11 @@ class AsyncAPIClient:
         assert result is not None
         return result
 
-    async def _post(self, path: str, *, body: dict[str, Any] | None = None, cast_to: type[_T],
+    async def _post(self, path: str, *, body: dict[str, Any] | None = None,
+                    files: dict[str, Any] | None = None, cast_to: type[_T],
                     extra_headers: dict[str, str] | None = None, extra_query: dict[str, object] | None = None,
                     timeout: float | httpx.Timeout | None = None) -> _T:
-        result = await self._request("POST", path, body=body, cast_to=cast_to,
+        result = await self._request("POST", path, body=body, files=files, cast_to=cast_to,
                                      extra_headers=extra_headers, extra_query=extra_query, timeout=timeout)
         assert result is not None
         return result

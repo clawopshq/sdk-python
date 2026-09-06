@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.51.0 (2026-09-06)
+
+### Added
+- **브랜드 메시지 자유형.** `template_id` 대신 `free` 에 말풍선을 직접 싣습니다 — 템플릿을
+  등록하지 않아도 되고, 종료된 친구톡을 대신하는 방식입니다.
+  ```python
+  client.messages.create(
+      to="01012345678", from_="07052358010",
+      brand={"channel_id": channel_id,
+             "free": {"chatBubbleType": "TEXT", "content": "신메뉴가 나왔어요."}},
+  )
+  ```
+  ⚠️ `free` 안쪽은 **SDK 가 검사하지 않습니다**(불투명 dict). 말풍선 규격표를 서버에 한 벌만
+  두는 것이 의도입니다 — SDK 가 사본을 들면 카카오가 칸을 늘린 날 SDK 가 조용히 깎습니다.
+- **`client.kakao.brand_images`** — 자유형에 실을 이미지 업로드·목록(동기·비동기 both).
+  받은 `id` 를 `free["imageId"]` 에 넣습니다. 한 번 올려 여러 발송에 재사용합니다.
+- 에러 코드 `kakao_brand_body_empty`·`kakao_brand_image_not_found` 등록.
+
+### Changed
+- ⚠️ **`BrandSendParam` 이 유니온이 되었습니다** — `BrandTemplateSendParam |
+  BrandFreeSendParam`. `template_id` 와 `free` 는 **정확히 하나만** 성립하고, 둘 다 주거나
+  둘 다 빼면 **mypy 가 잡습니다**(TypedDict 키 집합이 닫혀 있어서다). 타입을 쓰지 않는
+  호출자에게는 `TypeError` 입니다.
+
+  한 TypedDict 로 합쳐 optional 로 두지 않은 이유는, 그러면 `{"channel_id": …}` 만 준 오타가
+  타입을 통과해 **운영 트래픽의 런타임 400** 이 되기 때문입니다.
+
+  `BrandSendParam` 을 상속하던 코드는 유니온이라 더 이상 되지 않습니다 — 갈래 하나
+  (`BrandTemplateSendParam` / `BrandFreeSendParam`, 둘 다 `clawops.types` 에서
+  내보냅니다)를 직접 쓰십시오. minor 로 올린 이유가 이것입니다.
+
+### Fixed
+- multipart 요청에서 `Content-Type: application/json` 이 남아 **본문이 파싱되지 않던 것**을
+  고쳤습니다. boundary 는 httpx 가 붙이므로 우리가 정하면 안 됩니다.
+
 ## 0.50.0 (2026-09-05)
 
 ### Added

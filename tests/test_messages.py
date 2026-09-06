@@ -475,3 +475,49 @@ class TestAsyncMessagesCreateKakao:
         url = str(route.calls[0].request.url)
         assert "type=ata" in url
         assert "number=07052358010" in url
+
+
+class TestBrandFreeForm:
+    """자유형 — 템플릿 없이 말풍선을 직접 싣는다."""
+
+    @respx.mock
+    def test_free_body_passes_through_untouched(self, messages):
+        """⛔ SDK 는 말풍선 안을 검사하지 않는다 — 표는 서버에 한 벌뿐이다."""
+        route = respx.post(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(201, json=BMS_JSON))
+        free = {
+            "chatBubbleType": "CAROUSEL_FEED",
+            "carousel": {"list": [{"header": "카드1", "imageId": "cmtn8o4vb000a"}]},
+        }
+        messages.create(to="010", from_="070", brand={"channel_id": "c1", "free": free})
+
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["Brand"] == {"ChannelId": "c1", "Free": free}
+
+    @respx.mock
+    def test_template_form_unchanged(self, messages):
+        """자유형이 생겨도 템플릿형 몸통은 그대로다 — Free 키가 붙지 않는다."""
+        route = respx.post(f"{BASE}{MESSAGES_PATH}").mock(return_value=httpx.Response(201, json=BMS_JSON))
+        messages.create(to="010", from_="070", brand={"channel_id": "c1", "template_id": "t1"})
+
+        parsed = json.loads(route.calls[0].request.content)
+        assert parsed["Brand"] == {"ChannelId": "c1", "TemplateId": "t1"}
+
+    def test_both_forms_rejected(self, messages):
+        # ⛔ 서버와 같은 판정식이다 — 둘 다 실으면 어느 쪽으로 나갈지 정해 줄 수 없다.
+        with pytest.raises(TypeError, match="하나만 지정"):
+            messages.create(
+                to="010", from_="070",
+                brand={"channel_id": "c1", "template_id": "t1", "free": {"chatBubbleType": "TEXT"}},
+            )
+
+    def test_neither_form_rejected(self, messages):
+        with pytest.raises(TypeError, match="하나만 지정"):
+            messages.create(to="010", from_="070", brand={"channel_id": "c1"})
+
+    def test_free_with_variables_rejected(self, messages):
+        # 자유형엔 치환해 줄 템플릿이 없다 — `#{…}` 가 그대로 렌더된다.
+        with pytest.raises(TypeError, match="variables"):
+            messages.create(
+                to="010", from_="070",
+                brand={"channel_id": "c1", "free": {"chatBubbleType": "TEXT"}, "variables": {"고객명": "홍"}},
+            )
