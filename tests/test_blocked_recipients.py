@@ -14,7 +14,7 @@ PATH = f"/v1/accounts/{ACCOUNT}/blocked-recipients"
 
 SAMPLE = {
     "id": "blk_1",
-    "number": "01012345678",
+    "recipient": "01012345678",
     "channel": "call",
     "active": True,
     "source": "api",
@@ -46,36 +46,36 @@ class TestCreate:
     @respx.mock
     def test_create(self, blocked):
         route = respx.post(f"{BASE}{PATH}").mock(return_value=httpx.Response(201, json=SAMPLE))
-        res = blocked.create(number="010-1234-5678", channel="call", note="상담 중 거부")
+        res = blocked.create(recipient="010-1234-5678", channel="call", note="상담 중 거부")
 
         assert isinstance(res, BlockedRecipient)
         # 서버가 정규화한 번호가 그대로 돌아온다.
-        assert res.number == "01012345678"
+        assert res.recipient == "01012345678"
         assert res.active is True
         assert res.channel == "call"
 
         body = json.loads(route.calls[0].request.content)
-        assert body == {"number": "010-1234-5678", "channel": "call", "note": "상담 중 거부"}
+        assert body == {"recipient": "010-1234-5678", "channel": "call", "note": "상담 중 거부"}
 
     @respx.mock
     def test_create_omits_unset_options(self, blocked):
         route = respx.post(f"{BASE}{PATH}").mock(return_value=httpx.Response(201, json=SAMPLE))
-        blocked.create(number="01012345678", channel="message")
+        blocked.create(recipient="01012345678", channel="message")
         body = json.loads(route.calls[0].request.content)
-        assert body == {"number": "01012345678", "channel": "message"}
+        assert body == {"recipient": "01012345678", "channel": "message"}
         assert "source" not in body and "note" not in body
 
     @respx.mock
     def test_create_idempotent_200(self, blocked):
         """이미 차단 중이면 서버가 200 을 준다 — 에러가 아니다."""
         respx.post(f"{BASE}{PATH}").mock(return_value=httpx.Response(200, json=SAMPLE))
-        res = blocked.create(number="01012345678", channel="call")
+        res = blocked.create(recipient="01012345678", channel="call")
         assert res.id == "blk_1"
 
     @respx.mock
     def test_create_camel_case_source_ref(self, blocked):
         route = respx.post(f"{BASE}{PATH}").mock(return_value=httpx.Response(201, json=SAMPLE))
-        blocked.create(number="01012345678", channel="call", source_ref="CA1", source="console")
+        blocked.create(recipient="01012345678", channel="call", source_ref="CA1", source="console")
         body = json.loads(route.calls[0].request.content)
         assert body["sourceRef"] == "CA1"
         assert body["source"] == "console"
@@ -93,7 +93,7 @@ class TestList:
 
         assert len(page.data) == 1
         assert isinstance(page.data[0], BlockedRecipient)
-        assert page.data[0].number == "01012345678"
+        assert page.data[0].recipient == "01012345678"
 
         params = route.calls[0].request.url.params
         assert params["channel"] == "call"
@@ -186,7 +186,7 @@ class TestAsync:
         blocked = AsyncBlockedRecipients(client=client, account_id=ACCOUNT)
         try:
             respx.post(f"{BASE}{PATH}").mock(return_value=httpx.Response(201, json=SAMPLE))
-            created = await blocked.create(number="01012345678", channel="call")
+            created = await blocked.create(recipient="01012345678", channel="call")
             assert created.id == "blk_1"
 
             respx.delete(f"{BASE}{PATH}/blk_1").mock(
@@ -198,3 +198,60 @@ class TestAsync:
             assert released.active is False
         finally:
             await client.close()
+
+
+# ⛔ 이 클래스가 지키는 것은 **채널이 늘어도 SDK 가 안 죽는 것**이다.
+#
+#    channel 을 Literal["call", "message"] 로 굳혀 뒀다가 서버가 email 을 더한 순간,
+#    이메일 항목이 하나라도 섞인 목록 조회가 **파싱 단계에서 통째로 실패**했다. 고객은
+#    자기가 콘솔에서 등록한 항목 때문에 SDK 가 깨지는 것을 겪는다. 응답 타입을 좁히는
+#    것은 서버가 값을 늘리는 날 옛 SDK 를 전부 깨뜨리는 일이다.
+class TestChannelExtensibility:
+    @respx.mock
+    def test_email_channel_parses(self, blocked):
+        respx.get(f"{BASE}{PATH}/blk_1").mock(
+            return_value=httpx.Response(
+                200, json={**SAMPLE, "recipient": "kim@example.com", "channel": "email"}
+            )
+        )
+        res = blocked.retrieve("blk_1")
+        assert res.channel == "email"
+        assert res.recipient == "kim@example.com"
+
+    @respx.mock
+    def test_create_email(self, blocked):
+        route = respx.post(f"{BASE}{PATH}").mock(
+            return_value=httpx.Response(
+                201, json={**SAMPLE, "recipient": "kim@example.com", "channel": "email"}
+            )
+        )
+        blocked.create(recipient="Kim@Example.com", channel="email")
+        # 소문자 정규화는 **서버가** 한다 — SDK 가 흉내내면 규칙이 두 곳이 되고 갈린다.
+        body = json.loads(route.calls[0].request.content)
+        assert body == {"recipient": "Kim@Example.com", "channel": "email"}
+
+    @respx.mock
+    def test_unknown_channel_does_not_break(self, blocked):
+        respx.get(f"{BASE}{PATH}/blk_1").mock(
+            return_value=httpx.Response(200, json={**SAMPLE, "channel": "push"})
+        )
+        assert blocked.retrieve("blk_1").channel == "push"
+
+    @respx.mock
+    def test_internal_sources_parse(self, blocked):
+        # ARS 9번·문자 회신으로 들어온 항목은 source 가 'ars'·'sms' 다. 공개 API 로 등록할
+        # 수 있는 값만 허용하면 그 항목들에서 파싱이 깨진다.
+        respx.get(f"{BASE}{PATH}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {**SAMPLE, "source": "ars"},
+                        {**SAMPLE, "id": "blk_2", "source": "sms"},
+                    ],
+                    "meta": {"page": 0, "pageSize": 20, "total": 2},
+                },
+            )
+        )
+        page = blocked.list()
+        assert [r.source for r in page.data] == ["ars", "sms"]

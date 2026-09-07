@@ -26,7 +26,7 @@ class BlockedRecipients(SyncAPIResource):
     def create(
         self,
         *,
-        number: str,
+        recipient: str,
         channel: BlockedChannel,
         source: BlockedRecipientSource | None = None,
         source_ref: str | None = None,
@@ -35,26 +35,29 @@ class BlockedRecipients(SyncAPIResource):
         extra_query: dict[str, object] | None = None,
         timeout: float | None = None,
     ) -> BlockedRecipient:
-        """번호를 수신거부 명단에 등록합니다.
+        """수신거부 명단에 등록합니다.
 
-        하이픈·``+82`` 표기 모두 허용되며 국내 표기로 정규화되어 저장됩니다.
+        ``recipient`` 의 형식은 ``channel`` 이 정합니다 — call/message 는 **전화번호**
+        (하이픈·``+82`` 표기 모두 허용, 국내 표기로 정규화되어 저장), email 은 **이메일
+        주소**(소문자로 정규화).
 
-        **멱등입니다** — 이미 차단 중인 (번호, 채널)을 다시 등록해도 에러가 아니라 기존
+        **멱등입니다** — 이미 차단 중인 (대상, 채널)을 다시 등록해도 에러가 아니라 기존
         항목을 돌려줍니다. 같은 사람이 수신거부를 두 번 요청하는 것은 정상 상황입니다.
 
         Args:
-            number: 수신거부할 번호. '010-1234-5678', '+821012345678' 모두 가능.
-            channel: 'call'(전화) 또는 'message'(문자 — SMS/LMS/MMS 공통).
-            source: 접수 경로. 'api'(기본) | 'console' | 'import'.
+            recipient: 수신거부할 대상. call/message 면 '010-1234-5678'·'+821012345678',
+                email 이면 'kim@example.com'.
+            channel: 'call'(전화) · 'message'(문자 — SMS/LMS/MMS 공통) · 'email'(이메일).
+            source: 접수 경로. 'api'(기본) | 'console' | 'import' | 'agent'.
             source_ref: 증빙 링크(통화 id 또는 메시지 id).
             note: 자유 메모 (최대 500자).
 
         Raises:
-            BadRequestError: 번호 형식 오류, 잘못된 channel/source (400 VALIDATION).
+            BadRequestError: 대상 형식 오류, 잘못된 channel/source (400 VALIDATION).
         """
         body = strip_not_given(
             {
-                "number": number,
+                "recipient": recipient,
                 "channel": channel,
                 "source": source,
                 "sourceRef": source_ref,
@@ -74,7 +77,7 @@ class BlockedRecipients(SyncAPIResource):
         self,
         *,
         channel: BlockedChannel | None = None,
-        number: str | None = None,
+        recipient: str | None = None,
         status: BlockedRecipientStatus | None = None,
         page: int | None = None,
         page_size: int | None = None,
@@ -85,13 +88,13 @@ class BlockedRecipients(SyncAPIResource):
         """수신거부 목록을 조회합니다. ``auto_paging_iter()`` 로 전체 순회 가능.
 
         기본은 **현재 차단 중인 항목만** 이며, 해제 이력까지 보려면 ``status`` 를
-        'released' 또는 'all' 로 지정합니다. ``number`` 는 하이픈 표기로 넣어도
-        정규화 후 대조합니다.
+        'released' 또는 'all' 로 지정합니다. ``recipient`` 는 채널에 맞춰 정규화 후
+        대조하므로 하이픈 표기로도, 대문자 섞인 이메일로도 찾힙니다.
         """
         query = strip_not_given(
             {
                 "channel": channel,
-                "number": number,
+                "recipient": recipient,
                 "status": status,
                 "page": page,
                 "pageSize": page_size,
@@ -185,7 +188,7 @@ class AsyncBlockedRecipients(AsyncAPIResource):
     async def create(
         self,
         *,
-        number: str,
+        recipient: str,
         channel: BlockedChannel,
         source: BlockedRecipientSource | None = None,
         source_ref: str | None = None,
@@ -196,7 +199,7 @@ class AsyncBlockedRecipients(AsyncAPIResource):
     ) -> BlockedRecipient:
         body = strip_not_given(
             {
-                "number": number,
+                "recipient": recipient,
                 "channel": channel,
                 "source": source,
                 "sourceRef": source_ref,
@@ -216,7 +219,7 @@ class AsyncBlockedRecipients(AsyncAPIResource):
         self,
         *,
         channel: BlockedChannel | None = None,
-        number: str | None = None,
+        recipient: str | None = None,
         status: BlockedRecipientStatus | None = None,
         page: int | None = None,
         page_size: int | None = None,
@@ -227,7 +230,7 @@ class AsyncBlockedRecipients(AsyncAPIResource):
         query = strip_not_given(
             {
                 "channel": channel,
-                "number": number,
+                "recipient": recipient,
                 "status": status,
                 "page": page,
                 "pageSize": page_size,
