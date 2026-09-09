@@ -19,6 +19,23 @@ log = logging.getLogger("clawops.agent")
 INITIAL_RECONNECT_DELAY = 1.0
 MAX_RECONNECT_DELAY = 30.0
 
+# 다른 프로세스가 이 번호의 control 연결을 넘겨받았다(무중단 배포).
+CLOSE_REPLACED = 4409
+# 이 번호가 더 이상 이 계정 것이 아니다(반납/재배정).
+CLOSE_OWNERSHIP_LOST = 4403
+
+# 이 코드로 닫혔으면 재연결은 소용없는 게 아니라 **틀린 것**이다.
+#
+# control 연결은 번호당 하나뿐이다. 서버가 그 자리를 새 프로세스에 넘겼는데 우리가 재연결하면
+# 자기 연결을 되찾는 게 아니라 **방금 인계받은 프로세스를 밀어낸다**. 그러면 그쪽이 다시
+# 재연결해 우리를 밀어내고, 배포로 겹치는 창 내내 자리를 주고받는다. 그 핑퐁은 서버의
+# reconnect throttle 로 번져 번호가 분 단위로 격리된다(2026-05-21·05-28 ARI freeze 와 같은
+# 트리거). 재연결이 무중단 인계를 장애로 바꾼다.
+#
+# 나머지 코드(1001 gateway draining, 비정상 절단 등)는 계속 재연결한다 — 그때는 자리가
+# 실제로 비어 있고 그 자리의 주인이 우리다.
+NON_RETRYABLE_CLOSE_CODES = frozenset({CLOSE_REPLACED, CLOSE_OWNERSHIP_LOST})
+
 # 전환 결과를 기다리는 **방어선**. 정상 경로의 일부가 아니다 — 서버가 대상 응답 대기(transfer
 # 파라미터 `timeout`)를 관리하고 결과 이벤트를 반드시 보내므로, 클라이언트는 브리지가 얼마나
 # 길든 기다린다. 이 값에 도달하는 것은 "서버가 계약을 어겼다" 는 뜻이라 경고를 남긴다.
@@ -54,6 +71,7 @@ class ControlWebSocket:
         on_call_outbound_ready: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_call_ringing: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_call_failed: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_terminal_close: Callable[[int, str], None] | None = None,
     ) -> None:
         self._url = build_control_ws_url(base_url=base_url, account_id=account_id, number=number)
         self._api_key = api_key
@@ -62,6 +80,7 @@ class ControlWebSocket:
         self._on_call_outbound_ready = on_call_outbound_ready
         self._on_call_ringing = on_call_ringing
         self._on_call_failed = on_call_failed
+        self._on_terminal_close = on_terminal_close
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._running = False
@@ -86,6 +105,7 @@ class ControlWebSocket:
         while self._running:
             try:
                 self._connected.clear()
+                close_reason = ""
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(
                     self._url,
@@ -96,7 +116,11 @@ class ControlWebSocket:
                 log.info(f"Control WS connected: {self._url}")
                 delay = INITIAL_RECONNECT_DELAY
 
-                async for msg in self._ws:
+                # `async for` 를 쓰지 않는다. aiohttp 의 __anext__ 는 CLOSE/CLOSING/CLOSED 에
+                # StopAsyncIteration 을 내므로 CLOSE 메시지가 루프 몸통에 **도달하지 않는다** —
+                # 그러면 close_reason 이 영영 빈 문자열이라 인계 통지에 사유가 실리지 않는다.
+                while True:
+                    msg = await self._ws.receive()
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         # 이벤트 처리 예외를 연결 수명과 분리한다. 핸들러 하나가 던진 예외가
                         # 이 루프 밖으로 새면 연결 태스크가 통째로 죽는다 — 2026-08-12 사고가
@@ -107,8 +131,26 @@ class ControlWebSocket:
                             raise
                         except Exception:
                             log.exception("Control WS 이벤트 처리 실패 — 연결은 유지한다")
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSING,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
+                        if msg.type == aiohttp.WSMsgType.CLOSE:
+                            close_reason = msg.extra or ""
                         break
+
+                # 루프를 벗어났다 = 서버가 닫았다. **왜** 닫혔는지가 재연결 여부를 가른다.
+                close_code = self._ws.close_code if self._ws else None
+                if close_code in NON_RETRYABLE_CLOSE_CODES:
+                    self._running = False
+                    log.info(
+                        f"Control WS 종료 통지 ({close_code} {close_reason}) — "
+                        "재연결하지 않는다: 이 번호는 이제 다른 프로세스가 맡는다"
+                    )
+                    if self._on_terminal_close:
+                        self._on_terminal_close(close_code, close_reason)
 
             except asyncio.CancelledError:
                 # close() 나 태스크 취소 — 재접속하지 않는다.
