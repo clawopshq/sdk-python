@@ -18,6 +18,7 @@ WebSocket 역방향 연결 방식으로 ngrok 없이 로컬에서 바로 실행�
 | [녹음](recording.md)                 | 통화 녹음 설정                        |
 | [Tracing](tracing.md)                | OpenTelemetry 연동                    |
 | [아키텍처](architecture.md)          | 내부 구조, 보안 모델                  |
+| [배포](deployment.md)                | 무중단 배포, 인스턴스 수              |
 | [트러블슈팅](troubleshooting.md)     | SSL 인증서, 연결 실패 등 문제 해결    |
 
 ## 동작 원리
