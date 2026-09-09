@@ -39,6 +39,11 @@ log = logging.getLogger("clawops.agent")
 #    있는 동안은 유지해야 한다 — 버전 협상이 없어 "모두 새 서버" 를 확신할 방법이 없다.
 TERMINAL_FRAME_GRACE_S = 2.0
 
+# drain() 이 진행 중 통화를 기다리는 기본 상한(초).
+DEFAULT_DRAIN_TIMEOUT_S = 120.0
+# drain() 이 마지막 통화가 끝났는지 다시 보는 주기(초).
+DRAIN_POLL_INTERVAL_S = 0.2
+
 
 class ToolConfig(TypedDict, total=False):
     """Tool 실행 관련 설정."""
@@ -68,6 +73,7 @@ class ClawOpsAgent:
         tx_gain: float = 1.0,
         prewarm_enabled: bool = True,
         machine_detection: Literal["Enable", "Hangup"] | None = None,
+        on_taken_over: Callable[[int, str], None] | None = None,
     ) -> None:
         if api_key is None:
             api_key = os.environ.get("CLAWOPS_API_KEY")
@@ -126,6 +132,17 @@ class ClawOpsAgent:
         self._terminal_waiters: dict[str, asyncio.Event] = {}
         self._control_ws: ControlWebSocket | None = None
         self._control_ws_task: asyncio.Task[Any] | None = None
+        # 서버가 이 번호를 다른 프로세스에 넘긴 뒤 True(롤링 배포 인계).
+        self._taken_over = False
+        # control 연결을 **의도적으로 내놓은** 뒤 True(drain()/disconnect()).
+        # `self._control_ws is None` 과 다르다 — 그쪽은 "아직 연결한 적 없음" 까지 포함한다.
+        # 종료 프레임이 더는 못 온다고 확신할 수 있는 건 내놓은 뒤뿐이다.
+        self._control_given_up = False
+        # 인계 통지 훅. serve() 를 쓰면 필요 없다 — connect() 를 직접 모는 쪽이
+        # 그 통지를 받아 drain() 을 부를 수 있게 열어 둔 자리다.
+        self._on_taken_over = on_taken_over
+        # serve() 의 대기 이벤트 — 인계 통지도 시그널과 같은 방식으로 깨울 수 있게 잡아 둔다.
+        self._stop_serve: asyncio.Event | None = None
         # prewarm 추적 — outbound_ready 수신 시 session.prewarm() 을 백그라운드 task 로
         # 시작하고, _start_call_session 이 await + attach() 로 부착한다.
         self._prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -155,6 +172,14 @@ class ClawOpsAgent:
         """Control WS에 연결한다. 블로킹하지 않는다."""
         if self._control_ws is not None:
             return
+        # 인계 뒤의 재연결은 복구가 아니다 — 자리는 번호당 하나뿐이라 새 연결은 방금 넘겨받은
+        # 프로세스를 밀어내고, 그쪽이 다시 붙어 이쪽을 밀어낸다. call() 이 이 경로를 타므로
+        # drain 중/이후의 발신 한 건이 방금 내놓은 자리를 도로 뺏는 일이 생긴다.
+        if self._taken_over:
+            raise AgentError(
+                f"{self._from_number} 는 이제 다른 프로세스가 맡는다 — 재연결하면 그 프로세스를 "
+                "밀어낸다. 이 프로세스를 되살리지 말고 새 에이전트를 띄울 것."
+            )
         # 세션 프로세스 수명 셋업 (있으면). control WS task + 모든 통화 task 의 공통
         # 조상인 이 시점(root task)에서 돌아야 하는 준비 작업 — 예: LiveKitSession 이
         # HTTP 플러그인용 http_context 를 여기서 연다.
@@ -165,25 +190,152 @@ class ClawOpsAgent:
         await self._ensure_control_ws()
         log.info(f"ClawOpsAgent connected on {self._from_number}")
 
-    async def serve(self) -> None:
-        """인바운드 서버 모드: SIGINT/SIGTERM까지 대기 후 자동으로 disconnect()를 호출한다.
+    async def serve(self, *, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT_S) -> None:
+        """인바운드 서버 모드: 멈출 때가 되면 진행 중 통화를 마치고 돌아온다.
+
+        SIGINT/SIGTERM, 또는 **다른 프로세스가 이 번호를 넘겨받았을 때** 반환한다.
+        어느 경우든 drain() 이 진행 중 통화를 끝까지 처리한 뒤다.
+
+        인계로도 돌아오기 때문에 롤링 배포에 별도 배선이 필요 없다 — 새 인스턴스를 띄우면
+        구 인스턴스가 번호를 넘기고, 남은 통화를 마치고, 스스로 종료한다. 플랫폼의 유예
+        시간을 drain 상한보다 길게 잡을 것(k8s ``terminationGracePeriodSeconds``,
+        ECS ``stopTimeout``) — 안 그러면 drain 도중에 SIGKILL 이 온다.
 
         connect()가 호출되지 않은 상태면 자동으로 connect()를 먼저 수행한다.
         """
         await self.connect()
         stop_event = asyncio.Event()
+        cut_event = asyncio.Event()
+        self._stop_serve = stop_event
         loop = asyncio.get_running_loop()
+        signals = 0
+
+        def _on_signal() -> None:
+            # 인계는 스스로 drain 을 시작하고, 오케스트레이터가 교체 대상에 보내는 SIGTERM 은
+            # 그 **직후**에 온다. 그 첫 시그널을 "기다리지 말라" 로 세면 drain 이 지키려던
+            # 통화를 정확히 끊는다 — 즉시 종료는 두 번째 시그널부터다.
+            nonlocal signals
+            signals += 1
+            if signals >= 2:
+                log.warning("두 번째 종료 시그널 — 진행 중 통화를 즉시 끊는다")
+                cut_event.set()
+            stop_event.set()
+
+        # 핸들러는 drain 이 끝날 때까지 붙여 둔다. drain 전에 떼면 그 사이(최대 상한만큼)에
+        # 오는 SIGTERM 이 기본 처리로 떨어져 프로세스를 즉사시키고, 진행 중 통화가 통째로
+        # 끊긴다 — drain 을 만든 이유가 사라진다.
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, _on_signal)
         try:
             await stop_event.wait()
+            if cut_event.is_set():
+                await self.disconnect()
+                return
+
+            drain_task = asyncio.ensure_future(self.drain(timeout=drain_timeout))
+            cut_task = asyncio.ensure_future(cut_event.wait())
+            try:
+                await asyncio.wait({drain_task, cut_task}, return_when=asyncio.FIRST_COMPLETED)
+                if not drain_task.done():
+                    drain_task.cancel()
+                    await self.disconnect()
+            finally:
+                cut_task.cancel()
+                for task in (drain_task, cut_task):
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
         finally:
+            self._stop_serve = None
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
+
+    def _handle_taken_over(self, code: int, reason: str) -> None:
+        """서버가 이 번호의 control 연결을 다른 프로세스에 넘겼다.
+
+        오류가 아니다 — 교체되는 쪽에서 본 롤링 배포의 한가운데다. 새 콜은 이미 새
+        프로세스로 가고 있으니, 남은 건 들고 있던 통화를 마치고 비켜 주는 것뿐이다.
+        serve() 는 반환하는 것으로 그렇게 하고, connect() 를 직접 쓰는 쪽은
+        ``on_taken_over`` 로 통지받아 drain() 을 부르면 된다.
+        """
+        self._taken_over = True
+        log.info(f"{self._from_number} 는 이제 다른 프로세스가 맡는다 (close {code}) — 인계")
+        if self._on_taken_over:
+            try:
+                self._on_taken_over(code, reason)
+            except Exception:
+                log.exception("on_taken_over 콜백 실패")
+        if self._stop_serve is not None:
+            self._stop_serve.set()
+
+    @property
+    def taken_over(self) -> bool:
+        """다른 프로세스가 이 번호의 control 연결을 넘겨받았는가."""
+        return self._taken_over
+
+    async def drain(self, *, timeout: float = DEFAULT_DRAIN_TIMEOUT_S) -> tuple[int, int]:
+        """새 콜 수신을 멈추고, 이미 진행 중인 통화가 끝나기를 기다린 뒤 종료한다.
+
+        롤링 배포에 필요한 것이 이것이다. ``disconnect()`` 는 통화 도중에 끊는다 —
+        "지금 멈춰라" 라는 뜻일 때는 맞고 "넘겨라" 라는 뜻일 때는 틀리다. SIGTERM 이
+        둘 중 무엇이었는지는 부르는 쪽만 알기에 둘을 갈라 둔다.
+
+        가능한 이유는 control 과 미디어가 별개 연결이기 때문이다. control WS 를 닫는 것은
+        이 번호의 **배달 자리**를 내놓는 것뿐이라, 서버는 더 이상 ``call.incoming`` 을 보내지
+        않고 다음 자리 주인에게 콜을 넘긴다. 이미 붙은 통화는 통화별 미디어 연결로 계속
+        흐르고(여기서 건드리지 않는다), 발신자가 끊으면 각자 정상적으로 정리된다.
+
+        한 가지는 포기한다: ``call_end`` 의 ``ended_duration``. 그 값은 방금 닫은 control
+        연결을 타고 오므로, drain 중에 끝나는 통화는 duration 이 None 으로 보고된다.
+
+        Args:
+            timeout: 진행 중 통화를 기다리는 상한(초). 기본 120초. 이 시간이 지나도 남은
+                통화는 ``disconnect()`` 와 같은 방식으로 끊는다. 플랫폼 유예 시간을 이보다
+                길게 잡을 것 — 안 그러면 drain 도중 SIGKILL 로 의미가 사라진다.
+
+        Returns:
+            (스스로 끝난 통화 수, 상한에 걸려 끊은 통화 수).
+        """
+        # 배달 자리부터 내놓는다. 이 뒤에 도착하는 콜은 전부 다른 곳으로 간다.
+        self._control_given_up = True
+        if self._control_ws:
+            await self._control_ws.close()
+            self._control_ws = None
+        if self._control_ws_task and not self._control_ws_task.done():
+            self._control_ws_task.cancel()
+            self._control_ws_task = None
+        # 닫힌 제어 연결로는 종료 프레임이 올 수 없다 — 이미 기다리는 통화를 지금 깨운다.
+        # drain 중에 **나중에** 끝나는 통화는 _await_server_terminal 의 _control_given_up 검사가
+        # 맡는다. 그게 없으면 그 통화들은 아무도 못 깨우는 waiter 를 새로 등록하고
+        # 유예를 통째로 헛쓴다.
+        for waiter in list(self._terminal_waiters.values()):
+            waiter.set()
+
+        in_flight = len(self._active_sessions)
+        if in_flight == 0:
+            log.info("Drain: 진행 중인 통화 없음")
             await self.disconnect()
+            return (0, 0)
+
+        log.info(f"Drain: 진행 중인 통화 {in_flight}건이 끝나기를 기다린다 (상한 {timeout}s)")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._active_sessions and loop.time() < deadline:
+            await asyncio.sleep(DRAIN_POLL_INTERVAL_S)
+
+        forced = len(self._active_sessions)
+        if forced:
+            log.warning(f"Drain 상한 초과 — 진행 중이던 {forced}건을 끊는다")
+        else:
+            log.info(f"Drain 완료: {in_flight}건 모두 정상 종료")
+
+        await self.disconnect()
+        return (in_flight - forced, forced)
 
     async def disconnect(self) -> None:
         """Control WS 닫기 + 활성 세션 정리."""
+        self._control_given_up = True
         if self._control_ws:
             await self._control_ws.close()
             self._control_ws = None
@@ -268,6 +420,7 @@ class ClawOpsAgent:
         """Control WS가 없으면 연결한다."""
         if self._control_ws is not None:
             return
+        self._control_given_up = False
         self._control_ws = ControlWebSocket(
             base_url=self._base_url,
             api_key=self._api_key,
@@ -278,6 +431,7 @@ class ClawOpsAgent:
             on_call_outbound_ready=self._handle_outbound_ready,
             on_call_ringing=self._handle_ringing,
             on_call_failed=self._handle_failed,
+            on_terminal_close=self._handle_taken_over,
         )
         self._control_ws_task = asyncio.create_task(self._control_ws.connect())
         await self._control_ws.wait_connected()
@@ -517,13 +671,25 @@ class ClawOpsAgent:
                     recorder.write_outbound(ulaw_to_pcm16(ulaw), media_ts_ms=latest_media_ts)
                 await media_ws.send_audio(ulaw)
 
+            # drain() 은 이 통화가 도는 중에 control 연결을 None 으로 만든다. 그래서 참조는
+            # 전환마다 다시 읽고 검사해야 한다 — 그냥 self._control_ws 를 부르면 drain 중의
+            # 전환이 사용자 툴 밖으로 맨 AttributeError 를 던진다.
+            def _transfer(params: dict[str, Any]) -> Awaitable[dict[str, Any]]:
+                control_ws = self._control_ws
+                if control_ws is None:
+                    raise AgentError(
+                        "transfer 불가: control 연결이 닫혀 있다"
+                        "(drain 중이거나 이 번호가 다른 프로세스로 인계됐다)"
+                    )
+                return control_ws.request_transfer(call.call_id, params)
+
             call.bind_transport(
                 send_audio=send_audio,
                 send_clear=media_ws.send_clear,
                 hangup=media_ws.graceful_close,
                 send_dtmf=media_ws.send_dtmf,
                 media_ws=media_ws,
-                transfer=lambda params: self._control_ws.request_transfer(call.call_id, params),
+                transfer=_transfer,
             )
 
             await call._emit("call_start")
@@ -776,6 +942,10 @@ class ClawOpsAgent:
         예전부터 늘 오던 것이고(이번에 바뀐 건 내용뿐), 정상 경로에서는 밀리초 안에 풀린다.
         """
         if call.ended_duration is not None:
+            return
+        # 제어 연결을 이미 내놓았으면(drain/disconnect 이후) 종료 프레임은 영영 오지 않는다.
+        # 기다려 봐야 통화마다 유예를 통째로 헛쓰고 drain 꼬리만 길어진다.
+        if self._control_given_up:
             return
         waiter = asyncio.Event()
         self._terminal_waiters[call.call_id] = waiter
