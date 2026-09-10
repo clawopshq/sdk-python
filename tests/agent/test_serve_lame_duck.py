@@ -210,3 +210,83 @@ async def test_시그널_없이_온_인계는_그대로_반환한다() -> None:
 
     assert seen["drain"]["release_slot"] is False
     assert agent.taken_over is True
+
+
+# ── 마감 제거 (2026-09-10) ────────────────────────────────────────────────
+# 기본 마감 110초는 ECS `stopTimeout` 상한(120초)에서 나온 값인데 k8s 에도 그대로 쓰였다.
+# k8s 의 terminationGracePeriodSeconds 에는 상한이 없다. 실측하면 진행 중이던 통화의
+# **29.8%(464/1,559)가 110초를 넘는다** — 기다렸으면 끝났을 통화를 우리가 자르고 있었다.
+# 이제 끊는 주체는 플랫폼 SIGKILL 하나뿐이다.
+
+
+@pytest.mark.asyncio
+async def test_기본_마감이_없다() -> None:
+    """인자를 안 주면 드레이닝에 상한이 없어야 한다 — 이게 29.8% 절단의 원인이었다."""
+    import math
+
+    from clawops.agent._agent import DEFAULT_DRAIN_TIMEOUT_S, DEFAULT_SHUTDOWN_DEADLINE_S
+
+    assert math.isinf(DEFAULT_DRAIN_TIMEOUT_S), "드레이닝 상한이 유한하면 통화를 자른다"
+    assert math.isinf(DEFAULT_SHUTDOWN_DEADLINE_S), "절대 마감이 유한하면 통화를 자른다"
+
+    agent = _agent()
+    seen = _instrument(agent)
+
+    # 인계 대기는 그대로 짧다(후임이 없을 때 손해이므로) — 마감만 사라진다.
+    task = asyncio.create_task(agent.serve(handover_wait=0.1))
+    await asyncio.sleep(0.02)
+    asyncio.create_task(_raise_signal(signal.SIGTERM, 0.02))
+    await asyncio.wait_for(task, timeout=5)
+
+    assert math.isinf(seen["drain"]["timeout"]), (
+        f"drain 에 유한한 상한이 갔다: {seen['drain']['timeout']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_마감을_주면_예전처럼_나눠_쓴다() -> None:
+    """유예가 짧은 환경(ECS)은 값을 준다. 그때의 규약은 안 바뀐다 — 더하지 않고 나눠 쓴다."""
+    agent = _agent()
+    seen = _instrument(agent)
+
+    task = asyncio.create_task(agent.serve(handover_wait=0.4, shutdown_deadline=3.0))
+    await asyncio.sleep(0.02)
+    asyncio.create_task(_raise_signal(signal.SIGTERM, 0.02))
+    await asyncio.wait_for(task, timeout=5)
+
+    assert 2.3 <= seen["drain"]["timeout"] <= 2.7, seen["drain"]["timeout"]
+
+
+@pytest.mark.asyncio
+async def test_마감이_없어도_시그널로_빠져나올_수_있다() -> None:
+    """마감을 없앤 대신 **끝낼 길**이 있어야 한다 — 없으면 로컬에서 영영 안 죽는다.
+
+    SIGINT 는 1차가 곧 인계 중단이라 2차가 절단이다. drain 을 진짜로 매달아 두고,
+    두 번째 Ctrl-C 가 그걸 끊는지 본다.
+    """
+    agent = _agent()
+    seen: dict = {"drain_started": asyncio.Event(), "disconnect": 0}
+
+    async def _connect() -> None:
+        return None
+
+    async def _drain(*, timeout: float, release_slot: bool = True) -> tuple[int, int]:
+        seen["drain_started"].set()
+        await asyncio.sleep(3600)  # 마감이 없으면 여기서 영원히 기다린다
+        return (0, 0)
+
+    async def _disconnect() -> None:
+        seen["disconnect"] += 1
+
+    agent.connect = _connect  # type: ignore[method-assign]
+    agent.drain = _drain  # type: ignore[method-assign]
+    agent.disconnect = _disconnect  # type: ignore[method-assign]
+
+    task = asyncio.create_task(agent.serve())  # 기본값 = 마감 없음
+    await asyncio.sleep(0.02)
+    os.kill(os.getpid(), signal.SIGINT)  # 1차: 인계 건너뛰고 곧바로 드레이닝
+    await asyncio.wait_for(seen["drain_started"].wait(), timeout=2)
+    os.kill(os.getpid(), signal.SIGINT)  # 2차: 진행 중 통화까지 끊는다
+
+    await asyncio.wait_for(task, timeout=3)
+    assert seen["disconnect"] >= 1, "두 번째 시그널이 드레이닝을 못 끊었다"

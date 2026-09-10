@@ -47,8 +47,16 @@ log = logging.getLogger("clawops.agent")
 #    있는 동안은 유지해야 한다 — 버전 협상이 없어 "모두 새 서버" 를 확신할 방법이 없다.
 TERMINAL_FRAME_GRACE_S = 2.0
 
-# drain() 이 진행 중 통화를 기다리는 기본 상한(초).
-DEFAULT_DRAIN_TIMEOUT_S = 120.0
+# drain() 이 진행 중 통화를 기다리는 기본 상한(초). **기본은 무한이다.**
+#
+# 예전에는 120초였다. 그 값은 ECS `stopTimeout` 상한(120초)에서 나온 것인데 k8s 에도 그대로
+# 쓰였다 — k8s 의 `terminationGracePeriodSeconds` 에는 상한이 없다. 실측하면 진행 중이던 통화의
+# **29.8%(464/1,559)가 110초를 넘는다.** 기다렸으면 끝났을 통화를 우리가 자르고 있었다는 뜻이다.
+#
+# 이제 끊는 주체는 **플랫폼 SIGKILL 하나**다. 유예가 짧은 환경(ECS)은 그 유예가 곧 상한이므로
+# 여기서 따로 셀 이유가 없고, 유예가 긴 환경(k8s)은 통화가 끝날 때까지 기다리는 것이 맞다.
+# 유예보다 먼저 끊고 싶으면 호출측이 명시적으로 값을 준다.
+DEFAULT_DRAIN_TIMEOUT_S = math.inf
 # drain() 이 마지막 통화가 끝났는지 다시 보는 주기(초).
 DRAIN_POLL_INTERVAL_S = 0.2
 
@@ -64,13 +72,15 @@ DRAIN_POLL_INTERVAL_S = 0.2
 DEFAULT_HANDOVER_WAIT_S = 20.0
 
 # SIGTERM 부터 세는 **절대 마감**(초). 인계 대기와 드레이닝이 이 하나를 나눠 쓴다.
+# **기본은 무한이다** — 이유는 DEFAULT_DRAIN_TIMEOUT_S 주석과 같다.
 #
-# 두 값을 더하지 않는 이유: 더하면 플랫폼 유예를 넘긴다. 인계가 2초에 끝나면 드레이닝이
-# 108초를 쓰고, 인계에 20초를 다 쓰면 드레이닝은 90초를 쓴다.
+# 예전에는 110초였다(ECS stopTimeout 120초 − 정리 여유 10초). 그 값이 k8s 에도 그대로 쓰이면서,
+# 유예가 넉넉한 환경에서도 110초에 통화를 잘랐다.
 #
-# 110초인 이유: ECS `stopTimeout` 상한이 120초인데, 마감 뒤에도 disconnect() 가 MCP 종료를
-# await 하고 미디어를 닫고 프로세스가 빠지는 시간이 필요하다. 여유 10초를 남긴다.
-DEFAULT_SHUTDOWN_DEADLINE_S = 110.0
+# 마감이 유한할 때의 규약은 그대로다: 두 국면이 이 하나를 **나눠 쓴다**(더하지 않는다).
+# 인계가 2초에 끝나면 드레이닝이 나머지를 다 쓰고, 인계에 20초를 쓰면 그만큼 줄어든다.
+# 더하면 플랫폼 유예를 넘겨 SIGKILL 로 잘리기 때문이다.
+DEFAULT_SHUTDOWN_DEADLINE_S = math.inf
 
 
 async def _first_of(*events: asyncio.Event, timeout: float) -> None:
@@ -278,9 +288,18 @@ class ClawOpsAgent:
         1번이 배포의 빈틈을 없앤다. 예전에는 SIGTERM 을 받는 즉시 자리를 놓았고, 그때 후임이
         아직 안 떠 있으면 그 사이 오는 전화가 전부 죽었다.
 
-        **시간은 두 값을 더하지 않는다.** SIGTERM 부터 ``shutdown_deadline`` 하나를 세고,
-        인계 대기가 쓴 만큼 드레이닝의 몫이 줄어든다. 플랫폼 유예(k8s
-        ``terminationGracePeriodSeconds``, ECS ``stopTimeout``)를 이 마감보다 길게 잡을 것.
+        **마감은 기본이 없다.** 진행 중이던 통화가 끝날 때까지 기다리고, 끊는 것은 플랫폼
+        SIGKILL 하나뿐이다. 예전 기본값(110초)은 ECS ``stopTimeout`` 상한에서 나온 값인데 k8s
+        에도 그대로 쓰였고, 그래서 **진행 중이던 통화의 29.8% 를 우리가 직접 끊고 있었다.**
+
+        마감을 주면 규약은 그대로다 — **두 값을 더하지 않는다.** SIGTERM 부터
+        ``shutdown_deadline`` 하나를 세고, 인계 대기가 쓴 만큼 드레이닝의 몫이 줄어든다.
+        유예가 짧은 환경(ECS ``stopTimeout`` 은 120초가 상한)에서 유예 안에 스스로 정리하려면
+        그 유예보다 조금 짧게 준다.
+
+        ⚠️ 마감이 무한이어도 **빠져나올 길은 있다** — 종료 시그널을 두 번 더 보내면
+        (2차=인계 중단, 3차=진행 중 통화 절단) 즉시 끝난다. SIGINT 는 1차가 곧 2차 몫이라
+        Ctrl-C 두 번이면 끊긴다.
 
         ⚠️ **후임이 없을 때는 인계 대기가 손해다.** 스케일인이나 단순 정지에서는 그 대기 동안
         받은 전화가 유예 만료에 끊길 수 있다. 그래서 ``handover_wait`` 는 짧다(기본 20초).
@@ -497,9 +516,10 @@ class ClawOpsAgent:
         연결을 타고 오므로, drain 중에 끝나는 통화는 duration 이 None 으로 보고된다.
 
         Args:
-            timeout: 진행 중 통화를 기다리는 상한(초). 기본 120초. 이 시간이 지나도 남은
-                통화는 ``disconnect()`` 와 같은 방식으로 끊는다. 플랫폼 유예 시간을 이보다
-                길게 잡을 것 — 안 그러면 drain 도중 SIGKILL 로 의미가 사라진다.
+            timeout: 진행 중 통화를 기다리는 상한(초). **기본은 무한** — 통화가 끝날 때까지
+                기다리고, 끊는 것은 플랫폼 SIGKILL 하나뿐이다. 값을 주면 그 시간이 지난 뒤
+                남은 통화를 ``disconnect()`` 와 같은 방식으로 끊는다. 유예가 짧은 환경(ECS
+                ``stopTimeout`` 은 120초가 상한)에서 유예 안에 스스로 정리하고 싶을 때만 준다.
             release_slot: 배달 자리를 우리가 놓을지. 서버가 이미 인계 통지(`agent.retired`)를
                 보냈다면 자리는 이미 넘어갔으므로 **False** 로 두어 연결을 유지한다 — 그래야
                 진행 중이던 통화의 종료 이벤트가 이 연결로 돌아온다(`ended_duration` 포함).
@@ -539,7 +559,8 @@ class ClawOpsAgent:
             await self.disconnect()
             return (0, 0)
 
-        log.info(f"Drain 시작: 진행 중인 통화 {in_flight}건이 끝나기를 기다린다 (상한 {timeout}s)")
+        limit_txt = "상한 없음 — 플랫폼 유예까지" if math.isinf(timeout) else f"상한 {timeout}s"
+        log.info(f"Drain 시작: 진행 중인 통화 {in_flight}건이 끝나기를 기다린다 ({limit_txt})")
         loop = asyncio.get_running_loop()
         started = loop.time()
         deadline = started + timeout
@@ -552,7 +573,7 @@ class ClawOpsAgent:
             log.warning(
                 f"Drain 상한 초과({elapsed:.1f}s) — 진행 중이던 {forced}건을 끊는다. "
                 f"플랫폼 유예(terminationGracePeriodSeconds / stopTimeout)가 상한 {timeout}s "
-                "보다 길어야 이 절단이 사라진다"
+                "보다 길어야 이 절단이 사라진다 (상한을 안 주면 기본이 무한이다)"
             )
         else:
             log.info(f"Drain 완료({elapsed:.1f}s): {in_flight}건 모두 정상 종료")
