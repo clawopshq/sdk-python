@@ -52,10 +52,19 @@ TRANSFER_RESULT_MAX_WAIT_S = 7200.0
 TRANSFER_LATE_ARRIVAL_GRACE_S = 2.0
 
 
-def build_control_ws_url(*, base_url: str, account_id: str, number: str) -> str:
+def build_control_ws_url(
+    *, base_url: str, account_id: str, number: str, role: str | None = None
+) -> str:
     scheme = "wss" if base_url.startswith("https") else "ws"
     host = base_url.replace("https://", "").replace("http://", "").rstrip("/")
-    return f"{scheme}://{host}/v1/accounts/{account_id}/agent/listen?number={quote(number)}"
+    url = f"{scheme}://{host}/v1/accounts/{account_id}/agent/listen?number={quote(number)}"
+    # role=retiring = "나는 이미 물러난 프로세스다. 자리를 뺏지 말라."
+    #   lame duck 이 된 뒤에는 재연결하지 않는 것이 1차 방어지만, 그 방어를 우회하는 경로가
+    #   남아 있을 수 있다(하위 레이어 재시도 등). 그때 이 플래그가 없으면 SIGTERM 도 안 받은
+    #   후임을 밀어낸다 — 막으려던 핑퐁이 그대로 재현된다.
+    if role:
+        url += f"&role={quote(role)}"
+    return url
 
 
 class ControlWebSocket:
@@ -72,7 +81,9 @@ class ControlWebSocket:
         on_call_ringing: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_call_failed: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_terminal_close: Callable[[int, str], None] | None = None,
+        on_retired: Callable[[str], None] | None = None,
     ) -> None:
+        self._url_parts = {"base_url": base_url, "account_id": account_id, "number": number}
         self._url = build_control_ws_url(base_url=base_url, account_id=account_id, number=number)
         self._api_key = api_key
         self._on_call_incoming = on_call_incoming
@@ -81,6 +92,11 @@ class ControlWebSocket:
         self._on_call_ringing = on_call_ringing
         self._on_call_failed = on_call_failed
         self._on_terminal_close = on_terminal_close
+        self._on_retired = on_retired
+        # lame duck = 이 프로세스는 물러나는 중이다. 어떤 이유로 끊겨도 **재연결하지 않는다**.
+        #   게이트웨이 롤링(1001)이나 네트워크 blip(1006)에 재연결하면 그 사이 자리를 받은
+        #   후임을 밀어낸다. 후임은 SIGTERM 도 안 받았는데 물러나고, 우리는 곧 스스로 죽는다.
+        self._lame_duck = False
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._running = False
@@ -93,6 +109,18 @@ class ControlWebSocket:
         # requestId 를 echo 하지 않는 구 서버의 이벤트를 매핑하는 폴백에 쓴다.
         self._pending_by_call: dict[str, set[str]] = {}
         self._cleanup_timers: set[asyncio.TimerHandle] = set()
+
+    def enter_lame_duck(self) -> None:
+        """이제부터 끊겨도 재연결하지 않는다. 되돌릴 수 없다."""
+        if self._lame_duck:
+            return
+        self._lame_duck = True
+        # 이 뒤에 재연결하는 경로가 남아 있다면, 적어도 자리를 뺏지는 않게 한다.
+        self._url = build_control_ws_url(**self._url_parts, role="retiring")
+
+    @property
+    def lame_duck(self) -> bool:
+        return self._lame_duck
 
     async def wait_connected(self, timeout: float = 10.0) -> None:
         """Control WS 연결이 완료될 때까지 대기한다."""
@@ -174,6 +202,11 @@ class ControlWebSocket:
                 self._ws = None
                 self._session = None
 
+            if self._lame_duck:
+                # 물러나는 중이다. 자리는 이미 남의 것이거나 곧 남의 것이 된다.
+                log.info("Control WS 종료 — 물러나는 중이라 재연결하지 않는다")
+                self._running = False
+                return
             if self._running:
                 log.info(f"Control WS reconnecting in {delay:.1f}s...")
                 await asyncio.sleep(delay)
@@ -196,6 +229,17 @@ class ControlWebSocket:
             await self._on_call_ringing(data)
         elif event == "call.failed" and self._on_call_failed:
             await self._on_call_failed(data)
+        elif event == "agent.retired":
+            # 자리를 다른 프로세스가 넘겨받았다. 4409 close 와 같은 뜻인데 **연결은 살아 있다** —
+            # 진행 중이던 통화의 종료 이벤트가 이 연결로 돌아오게 하려고 서버가 남겨 둔 것이다.
+            # 그래서 여기서 끊으면 안 된다. 통화를 마치고 나가면 서버가 닫아 준다.
+            self._lame_duck = True
+            if self._on_retired:
+                self._on_retired(str(data.get("reason") or ""))
+        elif event == "agent.active":
+            # 앞선 자리 주인이 사라져 우리가 다시 자리를 받았다(승격). 이미 물러나기로 한
+            # 프로세스라면 되돌리지 않는다 — 곧 죽을 프로세스가 자리를 들고 있으면 안 된다.
+            log.info("서버가 이 연결을 다시 자리 주인으로 올렸다 (승격)")
         elif event in (
             "call.transfer.started",
             "call.transfer.connected",

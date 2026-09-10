@@ -119,3 +119,85 @@ async def test_still_reconnects_when_gateway_drains() -> None:
         await ws.close()
         task.cancel()
         await server.stop()
+
+
+# ── lame duck ─────────────────────────────────────────────────────────────
+# 물러나기로 한 프로세스가 재연결하면, 그 사이 자리를 받은 후임을 밀어낸다. 후임은 SIGTERM 도
+# 안 받았는데 물러나고, 우리는 곧 스스로 죽는다 — 자리가 통째로 빈다.
+#
+# 예전에는 drain() 이 control 을 **먼저 닫는** 것이 그 방어였다(닫으면 재연결 경로가 없다).
+# 인계 대기는 자리를 들고 기다리는 것이라 그 방어가 사라진다. 그래서 대체물이 필요하다.
+
+
+@pytest.mark.asyncio
+async def test_lame_duck_does_not_reconnect_on_gateway_drain() -> None:
+    """게이트웨이 롤링(1001)에도 재연결하지 않는다 — 평소에는 재연결하는 코드다."""
+    server = _Server()
+    await server.start()
+    ws = await _client(server)
+    task = asyncio.create_task(ws.connect())
+    try:
+        await ws.wait_connected(timeout=5)
+        ws.enter_lame_duck()
+
+        await server.accepted[0].close(code=1001, message=b"gateway draining")
+        await asyncio.sleep(1.8)
+
+        assert len(server.accepted) == 1, "물러나는 중에 재연결했다 — 후임을 밀어낸다"
+    finally:
+        await ws.close()
+        task.cancel()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_lame_duck_marks_itself_retiring_in_the_url() -> None:
+    """재연결하는 경로가 남아 있더라도 자리를 뺏지는 않게 한다(2차 방어)."""
+    server = _Server()
+    await server.start()
+    ws = await _client(server)
+    try:
+        assert "role=" not in ws._url
+        ws.enter_lame_duck()
+        assert "role=retiring" in ws._url
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_agent_retired_event_enters_lame_duck_without_closing() -> None:
+    """인계 통지는 **연결을 남긴 채** 온다 — 진행 중 통화의 종료 이벤트가 이 연결로 돌아온다."""
+    server = _Server()
+    await server.start()
+    retired: list[str] = []
+
+    async def _noop(_data: dict) -> None:
+        return None
+
+    ws = ControlWebSocket(
+        base_url=server.base_url,
+        api_key="key",
+        account_id="AC1",
+        number="07012345678",
+        on_call_incoming=_noop,
+        on_call_ended=_noop,
+        on_retired=retired.append,
+    )
+    task = asyncio.create_task(ws.connect())
+    try:
+        await ws.wait_connected(timeout=5)
+        await server.accepted[0].send_str(
+            '{"event":"agent.retired","number":"07012345678","reason":"replaced"}'
+        )
+        for _ in range(50):
+            if retired:
+                break
+            await asyncio.sleep(0.02)
+
+        assert retired == ["replaced"]
+        assert ws.lame_duck is True
+        assert not server.accepted[0].closed, "인계 통지에 연결을 끊으면 종료 이벤트를 못 받는다"
+    finally:
+        await ws.close()
+        task.cancel()
+        await server.stop()

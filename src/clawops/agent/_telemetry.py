@@ -14,12 +14,22 @@ MAX_ERRORS = 20
 MAX_ERROR_MESSAGE_LENGTH = 200
 
 
-def get_sdk_info() -> dict[str, str]:
+# 서버에 "이 SDK 를 어떻게 다뤄도 되는지" 를 알려주는 선언.
+#
+# `retire`: `agent.retired` 통지를 이해하고, 그걸 받으면 **재연결하지 않는다**. 서버는 이
+#   선언이 있는 연결에 한해 진행 중 통화가 없을 때 자리를 즉시 정리한다. 선언이 없는(구)
+#   SDK 는 서버가 상한까지 붙잡아 둔다 — 즉시 닫으면 그 SDK 가 도로 붙어 방금 인계받은
+#   프로세스를 밀어내기 때문이다(핑퐁).
+SDK_CAPABILITIES = ("retire",)
+
+
+def get_sdk_info() -> dict[str, Any]:
     return {
         "name": "clawops-python",
         "version": __version__,
         "runtime": f"python/{sys.version.split()[0]}",
         "os": f"{sys.platform}/{platform.machine()}",
+        "capabilities": list(SDK_CAPABILITIES),
     }
 
 
