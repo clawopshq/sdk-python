@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import List, Optional
 
 log = logging.getLogger("clawops.agent")
@@ -131,6 +132,50 @@ def warn_if_signals_blocked() -> None:
         "https://platform.claw-ops.com/docs/sdk/python/agent/deployment",
         swallower,
     )
+
+
+def write_ready_marker() -> None:
+    """이제 콜을 받을 수 있다고 표시한다.
+
+    **이 시점을 아는 것은 SDK 뿐이다.** 컨테이너가 떴다는 것과 콜을 받을 수 있다는 것은
+    다르다 — 그 사이(무거운 import, 모델 클라이언트 초기화, control 연결)가 배포의 빈틈이
+    되는 구간이고, 오케스트레이터는 그 끝을 알 방법이 없다. 그래서 예전에는 고객 앱이
+    ``connect()`` 뒤에 직접 파일을 만들어야 했다. 그 한 줄을 없애는 것이 이 함수다.
+
+    내용에 pid 와 기동 시각을 적는다 — 낡은 마커를 만났을 때 누가 남긴 것인지 보인다.
+    """
+    path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
+    if not path:
+        return
+    try:
+        with open(path, "w") as fh:
+            fh.write(f"pid={os.getpid()} since={int(time.time())}\n")
+    except OSError as err:
+        # read-only rootfs 등 — 표시를 못 남기는 것이 기동을 막을 이유는 아니다.
+        # 다만 조용히 넘기면 프로브가 영영 안 붙는데 아무도 모른다.
+        log.warning(
+            "준비 표시를 남기지 못했다 (%s): %s — readinessProbe 를 쓰고 있다면 그 프로브는 "
+            "영영 통과하지 못한다. 쓰기 가능한 볼륨(emptyDir 등)을 마운트하거나 "
+            "CLAWOPS_READY_FILE 로 경로를 옮길 것.",
+            path,
+            err,
+        )
+
+
+def remove_ready_marker() -> None:
+    """더 이상 새 콜을 받지 않는다고 표시한다(자리 인계·드레이닝·종료).
+
+    이걸 지우는 것이 프로브를 떨어뜨려 오케스트레이터가 이 인스턴스를 뒤로 뺀다.
+    """
+    path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as err:
+        log.debug("준비 표시 삭제 실패 (%s): %s", path, err)
 
 
 def clear_stale_ready_marker() -> None:

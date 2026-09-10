@@ -16,7 +16,13 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict
 from .._exceptions import AgentError
 from ._builtin_tools import BuiltinTool, resolve_builtin_tools
 from ._control_ws import CLOSE_REPLACED, ControlWebSocket
-from ._deploy_checks import clear_stale_ready_marker, warn_if_signals_blocked
+from ._health import start_health_server
+from ._deploy_checks import (
+    clear_stale_ready_marker,
+    remove_ready_marker,
+    warn_if_signals_blocked,
+    write_ready_marker,
+)
 from ._hold_audio import load_hold_audio
 from ._audio import apply_ulaw_gain, ulaw_to_pcm16
 from .mcp._client import MCPClient
@@ -185,6 +191,8 @@ class ClawOpsAgent:
         # 살아 있다** — 진행 중 통화의 종료 이벤트가 이 연결로 돌아온다. 그래서 우리가 먼저
         # 끊으면 안 된다.
         self._retired_serve: asyncio.Event | None = None
+        # 지금 콜을 받을 수 있는가. 파일 마커와 /healthz 가 같은 값을 본다.
+        self._ready = False
         # prewarm 추적 — outbound_ready 수신 시 session.prewarm() 을 백그라운드 task 로
         # 시작하고, _start_call_session 이 await + attach() 로 부착한다.
         self._prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -242,6 +250,7 @@ class ClawOpsAgent:
         drain_timeout: float = DEFAULT_DRAIN_TIMEOUT_S,
         handover_wait: float = DEFAULT_HANDOVER_WAIT_S,
         shutdown_deadline: float = DEFAULT_SHUTDOWN_DEADLINE_S,
+        health_port: int | None = None,
     ) -> None:
         """인바운드 서버 모드: 멈출 때가 되면 자리를 넘기고 통화를 마친 뒤 돌아온다.
 
@@ -270,6 +279,30 @@ class ClawOpsAgent:
 
         connect() 가 호출되지 않은 상태면 자동으로 connect() 를 먼저 수행한다.
         """
+        health_server = None
+        if health_port is not None:
+            # distroless 처럼 cat·sh 가 없는 이미지에서는 exec 프로브가 성립하지 않는다.
+            # 그때의 유일한 길이라 connect() **전에** 연다 — 기동이 느려도 프로브는 붙고
+            # 503 을 받는다(포트가 아예 안 열리면 프로브는 연결 거부로 실패한다).
+            health_server = await start_health_server(health_port, lambda: self._ready)
+        try:
+            await self._serve_inner(
+                drain_timeout=drain_timeout,
+                handover_wait=handover_wait,
+                shutdown_deadline=shutdown_deadline,
+            )
+        finally:
+            if health_server is not None:
+                health_server.close()
+                await health_server.wait_closed()
+
+    async def _serve_inner(
+        self,
+        *,
+        drain_timeout: float,
+        handover_wait: float,
+        shutdown_deadline: float,
+    ) -> None:
         await self.connect()
         stop_event = asyncio.Event()
         cut_event = asyncio.Event()
@@ -381,6 +414,8 @@ class ClawOpsAgent:
         ``on_taken_over`` 로 통지받아 drain() 을 부르면 된다.
         """
         self._taken_over = True
+        self._ready = False
+        remove_ready_marker()
         log.info(f"{self._from_number} 는 이제 다른 프로세스가 맡는다 (close {code}) — 인계")
         if self._on_taken_over:
             try:
@@ -404,6 +439,10 @@ class ClawOpsAgent:
         둘 이상 띄웠을 때가 대부분이다(replicas > 1). 로그에 그 의심을 남긴다.
         """
         self._taken_over = True
+        # 자리를 넘겼다 = 더 이상 새 콜을 받지 않는다. 프로브가 떨어져야 오케스트레이터가
+        # 이 인스턴스를 뒤로 뺀다.
+        self._ready = False
+        remove_ready_marker()
         log.info(f"{self._from_number} 는 이제 다른 프로세스가 맡는다 ({reason}) — 인계")
         if self._stop_serve is not None and not self._stop_serve.is_set():
             log.warning(
@@ -454,6 +493,9 @@ class ClawOpsAgent:
         Returns:
             (스스로 끝난 통화 수, 상한에 걸려 끊은 통화 수).
         """
+        # 드레이닝 = 새 콜을 안 받는다. 인계로 이미 지워졌을 수 있지만 멱등하다.
+        self._ready = False
+        remove_ready_marker()
         if release_slot:
             # 배달 자리부터 내놓는다. 이 뒤에 도착하는 콜은 전부 다른 곳으로 간다.
             self._control_given_up = True
@@ -505,6 +547,8 @@ class ClawOpsAgent:
 
     async def disconnect(self) -> None:
         """Control WS 닫기 + 활성 세션 정리."""
+        self._ready = False
+        remove_ready_marker()
         self._control_given_up = True
         if self._control_ws:
             await self._control_ws.close()
@@ -610,6 +654,10 @@ class ClawOpsAgent:
             await self._control_ws.send({"event": "agent.hello", "sdk": get_sdk_info()})
         except Exception:
             pass
+        # 여기가 "콜을 받을 수 있게 된 시점" 이다 — 그걸 아는 건 SDK 뿐이라 SDK 가 표시한다.
+        # 예전에는 고객 앱이 connect() 뒤에 직접 파일을 만들어야 했다.
+        self._ready = True
+        write_ready_marker()
 
     async def call(
         self,
