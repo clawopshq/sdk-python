@@ -28,6 +28,9 @@ log = logging.getLogger("clawops.agent")
 # 준비 표시 파일의 기본 경로. 배포 문서가 지시하는 그 경로다.
 DEFAULT_READY_FILE = "/tmp/clawops-ready"
 
+# import 시점에 지운 낡은 표시의 경로. 로거가 준비된 뒤에 알리려고 잠시 담아 둔다.
+_stale_cleared: Optional[str] = None
+
 # 부모 체인에서 이걸 만나면 시그널이 안 닿는다. npm 은 신호를 전달하기는 하지만 버전과
 # 플랫폼에 따라 다르고, 그 자체로 한 층을 더 얹으므로 함께 경고한다.
 _SIGNAL_SWALLOWERS = {
@@ -189,6 +192,7 @@ def clear_stale_ready_marker() -> None:
     path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
     if not path:
         return
+    global _stale_cleared
     try:
         os.unlink(path)
     except FileNotFoundError:
@@ -197,8 +201,14 @@ def clear_stale_ready_marker() -> None:
         # read-only rootfs 등 — 진단이 기동을 막으면 안 된다.
         log.debug("준비 표시 정리 실패 (%s): %s", path, err)
         return
-    log.warning(
-        "낡은 준비 표시를 지웠다: %s — 이전 프로세스가 남긴 것이다. "
-        "이게 남아 있으면 새 프로세스가 연결되기도 전에 Ready 로 판정돼 그동안 오는 콜이 죽는다.",
-        path,
-    )
+    # 여기는 **import 시점**이라 애플리케이션이 logging 을 설정하기 전일 수 있다. 그때 남긴
+    # 경고는 아무 핸들러에도 닿지 않고 묻힌다 — 그래서 사실만 담아 두고, 로거가 준비된
+    # connect() 에서 꺼내 알린다.
+    _stale_cleared = path
+
+
+def take_stale_clear_notice() -> Optional[str]:
+    """import 시점에 낡은 표시를 지웠다면 그 경로를 **한 번만** 돌려준다."""
+    global _stale_cleared
+    path, _stale_cleared = _stale_cleared, None
+    return path

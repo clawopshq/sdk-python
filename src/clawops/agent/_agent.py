@@ -20,6 +20,7 @@ from ._health import start_health_server
 from ._deploy_checks import (
     clear_stale_ready_marker,
     remove_ready_marker,
+    take_stale_clear_notice,
     warn_if_signals_blocked,
     write_ready_marker,
 )
@@ -193,6 +194,10 @@ class ClawOpsAgent:
         self._retired_serve: asyncio.Event | None = None
         # 지금 콜을 받을 수 있는가. 파일 마커와 /healthz 가 같은 값을 본다.
         self._ready = False
+        # 낡은 표시는 **패키지 import 시점에** 이미 지웠다(clawops/agent/__init__.py) — 거기가
+        # 가장 이르고, 그보다 늦으면 무거운 import 구간이 창으로 남는다. 여기서 한 번 더 부르는
+        # 것은 멱등이라 무해하고, 프로세스 안에서 에이전트를 다시 만드는 경로를 덮는다.
+        clear_stale_ready_marker()
         # prewarm 추적 — outbound_ready 수신 시 session.prewarm() 을 백그라운드 task 로
         # 시작하고, _start_call_session 이 await + attach() 로 부착한다.
         self._prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -222,9 +227,19 @@ class ClawOpsAgent:
         """Control WS에 연결한다. 블로킹하지 않는다."""
         if self._control_ws is not None:
             return
-        # 배포 환경 진단 — 동작은 안 바꾸고 조용한 실패만 시끄럽게 한다. 준비 표시 정리는
-        # 애플리케이션이 표시를 만들기 **전**이어야 하므로 여기가 유일한 자리다.
+        # 배포 환경 진단 — 동작은 안 바꾸고 조용한 실패만 시끄럽게 한다.
+        # 낡은 마커 정리는 __init__ 에서 이미 했다(멱등하지만 여기서도 한 번 더 — connect()
+        # 를 직접 여러 번 부르는 경로가 있다).
         clear_stale_ready_marker()
+        # import 시점에 지운 낡은 표시가 있었으면 여기서 알린다 — 그때는 로깅 설정 전이라
+        # 경고가 묻힌다.
+        stale = take_stale_clear_notice()
+        if stale:
+            log.warning(
+                "낡은 준비 표시를 지웠다: %s — 이전 프로세스가 남긴 것이다. 그대로 두면 새 "
+                "프로세스가 연결되기도 전에 Ready 로 판정돼 그동안 오는 콜이 죽는다.",
+                stale,
+            )
         warn_if_signals_blocked()
         # 인계 뒤의 재연결은 복구가 아니다 — 자리는 번호당 하나뿐이라 새 연결은 방금 넘겨받은
         # 프로세스를 밀어내고, 그쪽이 다시 붙어 이쪽을 밀어낸다. call() 이 이 경로를 타므로

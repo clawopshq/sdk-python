@@ -102,20 +102,20 @@ def test_경고에_고치는_법이_들어간다(fake_proc, caplog):
 
 
 class TestReadyMarker:
-    def test_낡은_표시를_지운다(self, tmp_path, monkeypatch, caplog):
+    def test_낡은_표시를_지우고_사실을_남긴다(self, tmp_path, monkeypatch):
         marker = tmp_path / "clawops-ready"
         marker.touch()
         monkeypatch.setenv("CLAWOPS_READY_FILE", str(marker))
-        with caplog.at_level(logging.WARNING, logger="clawops.agent"):
-            dc.clear_stale_ready_marker()
+        dc.clear_stale_ready_marker()
         assert not marker.exists()
-        assert "낡은 준비 표시" in caplog.text
+        # import 시점엔 로깅 설정 전이라 경고가 묻힌다 — 사실만 담아 두고 나중에 알린다.
+        assert dc.take_stale_clear_notice() == str(marker)
+        assert dc.take_stale_clear_notice() is None, "한 번만 돌려줘야 한다"
 
-    def test_없으면_조용하다(self, tmp_path, monkeypatch, caplog):
+    def test_없으면_조용하다(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAWOPS_READY_FILE", str(tmp_path / "nope"))
-        with caplog.at_level(logging.WARNING, logger="clawops.agent"):
-            dc.clear_stale_ready_marker()
-        assert caplog.records == []
+        dc.clear_stale_ready_marker()
+        assert dc.take_stale_clear_notice() is None
 
     def test_빈_값이면_끈다(self, tmp_path, monkeypatch):
         marker = tmp_path / "clawops-ready"
