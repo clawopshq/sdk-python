@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict
 from .._exceptions import AgentError
 from ._builtin_tools import BuiltinTool, resolve_builtin_tools
 from ._control_ws import ControlWebSocket
+from ._deploy_checks import clear_stale_ready_marker, warn_if_signals_blocked
 from ._hold_audio import load_hold_audio
 from ._audio import apply_ulaw_gain, ulaw_to_pcm16
 from .mcp._client import MCPClient
@@ -172,6 +173,10 @@ class ClawOpsAgent:
         """Control WS에 연결한다. 블로킹하지 않는다."""
         if self._control_ws is not None:
             return
+        # 배포 환경 진단 — 동작은 안 바꾸고 조용한 실패만 시끄럽게 한다. 준비 표시 정리는
+        # 애플리케이션이 표시를 만들기 **전**이어야 하므로 여기가 유일한 자리다.
+        clear_stale_ready_marker()
+        warn_if_signals_blocked()
         # 인계 뒤의 재연결은 복구가 아니다 — 자리는 번호당 하나뿐이라 새 연결은 방금 넘겨받은
         # 프로세스를 밀어내고, 그쪽이 다시 붙어 이쪽을 밀어낸다. call() 이 이 경로를 타므로
         # drain 중/이후의 발신 한 건이 방금 내놓은 자리를 도로 뺏는 일이 생긴다.
@@ -227,6 +232,10 @@ class ClawOpsAgent:
             if signals >= 2:
                 log.warning("두 번째 종료 시그널 — 진행 중 통화를 즉시 끊는다")
                 cut_event.set()
+            else:
+                # 배포 사후 판별이 로그만으로 되게 한다 — 시그널을 **들었는지** 여부가
+                # 셸 형태 진입점 사고의 갈림길이다(들으면 이 줄이 있고, 못 들으면 없다).
+                log.info("종료 시그널 수신 — 새 콜을 받지 않고 진행 중 통화를 마친다")
             stop_event.set()
 
         # 핸들러는 drain 이 끝날 때까지 붙여 둔다. drain 전에 떼면 그 사이(최대 상한만큼)에
@@ -326,17 +335,23 @@ class ClawOpsAgent:
             await self.disconnect()
             return (0, 0)
 
-        log.info(f"Drain: 진행 중인 통화 {in_flight}건이 끝나기를 기다린다 (상한 {timeout}s)")
+        log.info(f"Drain 시작: 진행 중인 통화 {in_flight}건이 끝나기를 기다린다 (상한 {timeout}s)")
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        started = loop.time()
+        deadline = started + timeout
         while self._active_sessions and loop.time() < deadline:
             await asyncio.sleep(DRAIN_POLL_INTERVAL_S)
 
+        elapsed = loop.time() - started
         forced = len(self._active_sessions)
         if forced:
-            log.warning(f"Drain 상한 초과 — 진행 중이던 {forced}건을 끊는다")
+            log.warning(
+                f"Drain 상한 초과({elapsed:.1f}s) — 진행 중이던 {forced}건을 끊는다. "
+                f"플랫폼 유예(terminationGracePeriodSeconds / stopTimeout)가 상한 {timeout}s "
+                "보다 길어야 이 절단이 사라진다"
+            )
         else:
-            log.info(f"Drain 완료: {in_flight}건 모두 정상 종료")
+            log.info(f"Drain 완료({elapsed:.1f}s): {in_flight}건 모두 정상 종료")
 
         await self.disconnect()
         return (in_flight - forced, forced)
