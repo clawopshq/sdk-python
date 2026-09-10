@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import List, Optional
 
 log = logging.getLogger("clawops.agent")
 
 # 준비 표시 파일의 기본 경로. 배포 문서가 지시하는 그 경로다.
 DEFAULT_READY_FILE = "/tmp/clawops-ready"
+
+# import 시점에 지운 낡은 표시의 경로. 로거가 준비된 뒤에 알리려고 잠시 담아 둔다.
+_stale_cleared: Optional[str] = None
 
 # 부모 체인에서 이걸 만나면 시그널이 안 닿는다. npm 은 신호를 전달하기는 하지만 버전과
 # 플랫폼에 따라 다르고, 그 자체로 한 층을 더 얹으므로 함께 경고한다.
@@ -133,6 +137,50 @@ def warn_if_signals_blocked() -> None:
     )
 
 
+def write_ready_marker() -> None:
+    """이제 콜을 받을 수 있다고 표시한다.
+
+    **이 시점을 아는 것은 SDK 뿐이다.** 컨테이너가 떴다는 것과 콜을 받을 수 있다는 것은
+    다르다 — 그 사이(무거운 import, 모델 클라이언트 초기화, control 연결)가 배포의 빈틈이
+    되는 구간이고, 오케스트레이터는 그 끝을 알 방법이 없다. 그래서 예전에는 고객 앱이
+    ``connect()`` 뒤에 직접 파일을 만들어야 했다. 그 한 줄을 없애는 것이 이 함수다.
+
+    내용에 pid 와 기동 시각을 적는다 — 낡은 마커를 만났을 때 누가 남긴 것인지 보인다.
+    """
+    path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
+    if not path:
+        return
+    try:
+        with open(path, "w") as fh:
+            fh.write(f"pid={os.getpid()} since={int(time.time())}\n")
+    except OSError as err:
+        # read-only rootfs 등 — 표시를 못 남기는 것이 기동을 막을 이유는 아니다.
+        # 다만 조용히 넘기면 프로브가 영영 안 붙는데 아무도 모른다.
+        log.warning(
+            "준비 표시를 남기지 못했다 (%s): %s — readinessProbe 를 쓰고 있다면 그 프로브는 "
+            "영영 통과하지 못한다. 쓰기 가능한 볼륨(emptyDir 등)을 마운트하거나 "
+            "CLAWOPS_READY_FILE 로 경로를 옮길 것.",
+            path,
+            err,
+        )
+
+
+def remove_ready_marker() -> None:
+    """더 이상 새 콜을 받지 않는다고 표시한다(자리 인계·드레이닝·종료).
+
+    이걸 지우는 것이 프로브를 떨어뜨려 오케스트레이터가 이 인스턴스를 뒤로 뺀다.
+    """
+    path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as err:
+        log.debug("준비 표시 삭제 실패 (%s): %s", path, err)
+
+
 def clear_stale_ready_marker() -> None:
     """기동 시 낡은 준비 표시를 지운다.
 
@@ -144,6 +192,7 @@ def clear_stale_ready_marker() -> None:
     path = os.environ.get("CLAWOPS_READY_FILE", DEFAULT_READY_FILE)
     if not path:
         return
+    global _stale_cleared
     try:
         os.unlink(path)
     except FileNotFoundError:
@@ -152,8 +201,14 @@ def clear_stale_ready_marker() -> None:
         # read-only rootfs 등 — 진단이 기동을 막으면 안 된다.
         log.debug("준비 표시 정리 실패 (%s): %s", path, err)
         return
-    log.warning(
-        "낡은 준비 표시를 지웠다: %s — 이전 프로세스가 남긴 것이다. "
-        "이게 남아 있으면 새 프로세스가 연결되기도 전에 Ready 로 판정돼 그동안 오는 콜이 죽는다.",
-        path,
-    )
+    # 여기는 **import 시점**이라 애플리케이션이 logging 을 설정하기 전일 수 있다. 그때 남긴
+    # 경고는 아무 핸들러에도 닿지 않고 묻힌다 — 그래서 사실만 담아 두고, 로거가 준비된
+    # connect() 에서 꺼내 알린다.
+    _stale_cleared = path
+
+
+def take_stale_clear_notice() -> Optional[str]:
+    """import 시점에 낡은 표시를 지웠다면 그 경로를 **한 번만** 돌려준다."""
+    global _stale_cleared
+    path, _stale_cleared = _stale_cleared, None
+    return path
