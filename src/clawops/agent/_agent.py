@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 from .._exceptions import AgentError
 from ._builtin_tools import BuiltinTool, resolve_builtin_tools
-from ._control_ws import ControlWebSocket
+from ._control_ws import CLOSE_REPLACED, ControlWebSocket
 from ._deploy_checks import clear_stale_ready_marker, warn_if_signals_blocked
 from ._hold_audio import load_hold_audio
 from ._audio import apply_ulaw_gain, ulaw_to_pcm16
@@ -44,6 +44,43 @@ TERMINAL_FRAME_GRACE_S = 2.0
 DEFAULT_DRAIN_TIMEOUT_S = 120.0
 # drain() 이 마지막 통화가 끝났는지 다시 보는 주기(초).
 DRAIN_POLL_INTERVAL_S = 0.2
+
+# SIGTERM 뒤 **자리를 계속 들고 있으면서** 후임의 인계를 기다리는 상한(초).
+#
+# 이 대기가 배포의 빈틈을 없앤다. 예전에는 SIGTERM 을 받는 즉시 자리를 놓았는데, 그때
+# 후임이 아직 안 붙었으면 그 사이 오는 전화가 전부 죽었다(readinessProbe 는 그 순간이
+# 오지 않게 오케스트레이터를 붙잡아 두는 우회다).
+#
+# ⚠ 짧아야 한다. **후임이 아예 없을 때는 이 대기가 손해다** — 스케일인이나 단순 정지에서는
+#   예전처럼 자리를 즉시 놓는 편이 낫다(그 뒤 전화는 "안 걸림"). 여기서 받은 전화가 유예
+#   만료에 "통화 중 절단"이 되면 그게 더 나쁘다.
+DEFAULT_HANDOVER_WAIT_S = 20.0
+
+# SIGTERM 부터 세는 **절대 마감**(초). 인계 대기와 드레이닝이 이 하나를 나눠 쓴다.
+#
+# 두 값을 더하지 않는 이유: 더하면 플랫폼 유예를 넘긴다. 인계가 2초에 끝나면 드레이닝이
+# 108초를 쓰고, 인계에 20초를 다 쓰면 드레이닝은 90초를 쓴다.
+#
+# 110초인 이유: ECS `stopTimeout` 상한이 120초인데, 마감 뒤에도 disconnect() 가 MCP 종료를
+# await 하고 미디어를 닫고 프로세스가 빠지는 시간이 필요하다. 여유 10초를 남긴다.
+DEFAULT_SHUTDOWN_DEADLINE_S = 110.0
+
+
+async def _first_of(*events: asyncio.Event, timeout: float) -> None:
+    """이벤트 중 **아무거나 하나**가 서거나 시간이 다 될 때까지 기다린다."""
+    if timeout <= 0 or any(e.is_set() for e in events):
+        return
+    waiters = [asyncio.ensure_future(e.wait()) for e in events]
+    try:
+        await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters:
+            w.cancel()
+        for w in waiters:
+            try:
+                await w
+            except asyncio.CancelledError:
+                pass
 
 
 class ToolConfig(TypedDict, total=False):
@@ -144,6 +181,10 @@ class ClawOpsAgent:
         self._on_taken_over = on_taken_over
         # serve() 의 대기 이벤트 — 인계 통지도 시그널과 같은 방식으로 깨울 수 있게 잡아 둔다.
         self._stop_serve: asyncio.Event | None = None
+        # 서버가 자리를 넘겼다고 통지했다(agent.retired). 4409 close 와 뜻은 같지만 **연결이
+        # 살아 있다** — 진행 중 통화의 종료 이벤트가 이 연결로 돌아온다. 그래서 우리가 먼저
+        # 끊으면 안 된다.
+        self._retired_serve: asyncio.Event | None = None
         # prewarm 추적 — outbound_ready 수신 시 session.prewarm() 을 백그라운드 task 로
         # 시작하고, _start_call_session 이 await + attach() 로 부착한다.
         self._prewarm_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -195,61 +236,123 @@ class ClawOpsAgent:
         await self._ensure_control_ws()
         log.info(f"ClawOpsAgent connected on {self._from_number}")
 
-    async def serve(self, *, drain_timeout: float = DEFAULT_DRAIN_TIMEOUT_S) -> None:
-        """인바운드 서버 모드: 멈출 때가 되면 진행 중 통화를 마치고 돌아온다.
+    async def serve(
+        self,
+        *,
+        drain_timeout: float = DEFAULT_DRAIN_TIMEOUT_S,
+        handover_wait: float = DEFAULT_HANDOVER_WAIT_S,
+        shutdown_deadline: float = DEFAULT_SHUTDOWN_DEADLINE_S,
+    ) -> None:
+        """인바운드 서버 모드: 멈출 때가 되면 자리를 넘기고 통화를 마친 뒤 돌아온다.
 
-        SIGINT/SIGTERM, 또는 **다른 프로세스가 이 번호를 넘겨받았을 때** 반환한다.
-        어느 경우든 drain() 이 진행 중 통화를 끝까지 처리한 뒤다.
+        종료 시그널을 받으면 두 국면을 지난다.
 
-        ⚠️ **인계 통지가 항상 오지는 않는다.** 통지(4409)는 같은 게이트웨이 안에서 연결이
-        교체될 때 나가는데, 새 인스턴스가 다른 게이트웨이에 붙으면 옛 인스턴스는 통지를
-        받지 못한다(2026-09-09 프로덕션 실측). 그때는 이 함수가 반환하지 않고, 새 콜을
-        받지 않는 상태로 남아 있다가 종료 시그널에서 drain 을 거쳐 끝난다.
+        1. **인계 대기** — 자리를 놓지 않고 계속 전화를 받는다. 후임이 붙어 서버가 자리를
+           넘길 때까지(`agent.retired`), 또는 ``handover_wait`` 까지.
+        2. **드레이닝** — 새 전화는 후임에게 간다. 진행 중이던 통화만 끝까지 기다린다.
 
-        어느 쪽이든 **콜 배달은 항상 최신 인스턴스로 간다** — 그건 게이트웨이별 레지스트리가
-        아니라 공용 레지스트리가 정하기 때문이다. 그래서 무중단 자체는 영향받지 않는다.
-        다만 "새 인스턴스를 띄우면 옛 것이 알아서 죽는다"고 가정하면 안 된다 — 롤링 배포의
-        '옛 인스턴스를 내리는' 단계는 그대로 필요하다.
+        1번이 배포의 빈틈을 없앤다. 예전에는 SIGTERM 을 받는 즉시 자리를 놓았고, 그때 후임이
+        아직 안 떠 있으면 그 사이 오는 전화가 전부 죽었다.
 
-        플랫폼의 유예 시간을 drain 상한보다 길게 잡을 것(k8s ``terminationGracePeriodSeconds``,
-        ECS ``stopTimeout``) — 안 그러면 drain 도중에 SIGKILL 이 온다.
+        **시간은 두 값을 더하지 않는다.** SIGTERM 부터 ``shutdown_deadline`` 하나를 세고,
+        인계 대기가 쓴 만큼 드레이닝의 몫이 줄어든다. 플랫폼 유예(k8s
+        ``terminationGracePeriodSeconds``, ECS ``stopTimeout``)를 이 마감보다 길게 잡을 것.
 
-        connect()가 호출되지 않은 상태면 자동으로 connect()를 먼저 수행한다.
+        ⚠️ **후임이 없을 때는 인계 대기가 손해다.** 스케일인이나 단순 정지에서는 그 대기 동안
+        받은 전화가 유예 만료에 끊길 수 있다. 그래서 ``handover_wait`` 는 짧다(기본 20초).
+        후임을 띄우지 않고 내리기만 하는 배포라면 ``handover_wait=0`` 으로 꺼도 된다.
+
+        시그널 규약:
+
+        - **SIGTERM** 1차 = 인계 대기 시작, 2차 = 인계 대기 중단하고 드레이닝, 3차 = 즉시 절단.
+        - **SIGINT** 는 예전과 같다 — 인계를 기다리지 않고 곧바로 드레이닝한다. 로컬에서
+          Ctrl-C 를 눌렀는데 20초를 기다리면 안 된다.
+
+        connect() 가 호출되지 않은 상태면 자동으로 connect() 를 먼저 수행한다.
         """
         await self.connect()
         stop_event = asyncio.Event()
         cut_event = asyncio.Event()
+        retired_event = asyncio.Event()
+        # 인계를 더 기다리지 않는다(2차 시그널 · SIGINT). 절단과는 다르다 — 진행 중 통화는
+        # 여전히 드레이닝이 지킨다.
+        skip_handover_event = asyncio.Event()
         self._stop_serve = stop_event
+        self._retired_serve = retired_event
+        # 인계 통지가 이미 와 있었으면(연결 직후 교체) 그 상태를 그대로 반영한다.
+        if self._taken_over:
+            retired_event.set()
+            stop_event.set()
         loop = asyncio.get_running_loop()
         signals = 0
 
-        def _on_signal() -> None:
-            # 인계는 스스로 drain 을 시작하고, 오케스트레이터가 교체 대상에 보내는 SIGTERM 은
-            # 그 **직후**에 온다. 그 첫 시그널을 "기다리지 말라" 로 세면 drain 이 지키려던
-            # 통화를 정확히 끊는다 — 즉시 종료는 두 번째 시그널부터다.
+        def _on_signal(name: str) -> None:
+            # 시그널은 **단계를 하나씩 올린다.** 인계는 스스로 종료를 시작하고, 오케스트레이터가
+            # 교체 대상에 보내는 SIGTERM 은 그 직후에 온다 — 그 첫 시그널을 "기다리지 말라" 로
+            # 세면 지키려던 통화를 정확히 끊는다.
+            #
+            #   1차  종료 시작(SIGTERM 은 인계 대기부터, SIGINT 는 곧바로 드레이닝)
+            #   2차  인계를 더 기다리지 않는다 → 드레이닝
+            #   3차  진행 중 통화까지 끊는다
             nonlocal signals
             signals += 1
-            if signals >= 2:
-                log.warning("두 번째 종료 시그널 — 진행 중 통화를 즉시 끊는다")
-                cut_event.set()
-            else:
+            if signals == 1:
                 # 배포 사후 판별이 로그만으로 되게 한다 — 시그널을 **들었는지** 여부가
                 # 셸 형태 진입점 사고의 갈림길이다(들으면 이 줄이 있고, 못 들으면 없다).
-                log.info("종료 시그널 수신 — 새 콜을 받지 않고 진행 중 통화를 마친다")
+                log.info(f"{name} 수신 — 종료 절차 시작")
+                if name == "SIGINT":
+                    # 로컬에서 Ctrl-C 를 눌렀는데 인계를 20초 기다리면 안 된다.
+                    skip_handover_event.set()
+            elif not skip_handover_event.is_set():
+                log.warning(f"{name}: 두 번째 종료 시그널 — 인계를 더 기다리지 않는다")
+                skip_handover_event.set()
+            else:
+                log.warning(f"{name}: 종료 시그널 반복 — 진행 중 통화를 즉시 끊는다")
+                cut_event.set()
             stop_event.set()
 
-        # 핸들러는 drain 이 끝날 때까지 붙여 둔다. drain 전에 떼면 그 사이(최대 상한만큼)에
-        # 오는 SIGTERM 이 기본 처리로 떨어져 프로세스를 즉사시키고, 진행 중 통화가 통째로
-        # 끊긴다 — drain 을 만든 이유가 사라진다.
+        # 핸들러는 드레이닝이 끝날 때까지 붙여 둔다. 먼저 떼면 그 사이(최대 마감만큼)에 오는
+        # SIGTERM 이 기본 처리로 떨어져 프로세스를 즉사시키고, 진행 중 통화가 통째로 끊긴다.
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, _on_signal)
+            loop.add_signal_handler(sig, _on_signal, sig.name)
         try:
             await stop_event.wait()
+            deadline_at = loop.time() + shutdown_deadline
+
+            # ── 국면 1: 인계 대기 ──
+            # SIGTERM 으로 내려가는 중이고, 아직 인계를 못 받았고, 절단 지시도 없을 때만.
+            wait_for_handover = (
+                handover_wait > 0
+                and not skip_handover_event.is_set()
+                and not retired_event.is_set()
+                and not cut_event.is_set()
+            )
+            if wait_for_handover:
+                # 여기부터는 무슨 이유로 끊겨도 재연결하지 않는다. 재연결하면 그 사이 자리를
+                # 받은 후임을 밀어낸다 — 후임은 SIGTERM 도 안 받았는데 물러나게 된다.
+                if self._control_ws:
+                    self._control_ws.enter_lame_duck()
+                budget = min(handover_wait, max(0.0, deadline_at - loop.time()))
+                log.info(f"인계 대기 — 자리를 유지한 채 후임을 기다린다 (최대 {budget:.0f}s)")
+                await _first_of(retired_event, skip_handover_event, cut_event, timeout=budget)
+                if retired_event.is_set():
+                    log.info("인계 완료 — 새 전화는 후임이 받는다")
+                else:
+                    log.info("인계 통지 없음 — 자리를 놓고 드레이닝으로 넘어간다")
+
+            # ── 국면 2: 드레이닝 ──
             if cut_event.is_set():
                 await self.disconnect()
                 return
 
-            drain_task = asyncio.ensure_future(self.drain(timeout=drain_timeout))
+            # 인계를 받았으면 자리는 이미 서버가 가져갔다 — 연결을 **유지**해야 진행 중이던
+            # 통화의 종료 이벤트(ended_duration 포함)가 이 연결로 돌아온다. 인계가 없었으면
+            # 우리가 직접 자리를 놓아야 새 전화가 다른 곳으로 간다.
+            release_slot = not retired_event.is_set()
+            budget = max(0.0, min(drain_timeout, deadline_at - loop.time()))
+            drain_task = asyncio.ensure_future(
+                self.drain(timeout=budget, release_slot=release_slot)
+            )
             cut_task = asyncio.ensure_future(cut_event.wait())
             try:
                 await asyncio.wait({drain_task, cut_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -265,6 +368,7 @@ class ClawOpsAgent:
                         pass
         finally:
             self._stop_serve = None
+            self._retired_serve = None
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
 
@@ -283,6 +387,36 @@ class ClawOpsAgent:
                 self._on_taken_over(code, reason)
             except Exception:
                 log.exception("on_taken_over 콜백 실패")
+        # 연결은 이미 닫혔지만 "자리를 넘겼다" 는 사실은 같다 — serve() 가 자리를 또 놓으려
+        # 하지 않게 표시한다.
+        if self._retired_serve is not None:
+            self._retired_serve.set()
+        if self._stop_serve is not None:
+            self._stop_serve.set()
+
+    def _handle_retired(self, reason: str) -> None:
+        """서버가 자리를 넘겼다고 알려왔다(`agent.retired`) — **연결은 살아 있다.**
+
+        4409 close 와 뜻은 같지만 끊기지 않았다. 서버가 진행 중이던 통화의 종료 이벤트를
+        이 연결로 돌려주려고 남겨 둔 것이다. 그러니 여기서 끊지 않는다.
+
+        종료 시그널 없이 이게 왔다면 우리가 아는 배포가 아니다 — 같은 번호로 인스턴스를
+        둘 이상 띄웠을 때가 대부분이다(replicas > 1). 로그에 그 의심을 남긴다.
+        """
+        self._taken_over = True
+        log.info(f"{self._from_number} 는 이제 다른 프로세스가 맡는다 ({reason}) — 인계")
+        if self._stop_serve is not None and not self._stop_serve.is_set():
+            log.warning(
+                "종료 시그널 없이 인계가 왔다 — 같은 번호로 인스턴스가 둘 이상 떠 있지 않은지 "
+                "확인할 것(replicas 는 1 이어야 한다)"
+            )
+        if self._on_taken_over:
+            try:
+                self._on_taken_over(CLOSE_REPLACED, reason)
+            except Exception:
+                log.exception("on_taken_over 콜백 실패")
+        if self._retired_serve is not None:
+            self._retired_serve.set()
         if self._stop_serve is not None:
             self._stop_serve.set()
 
@@ -291,7 +425,9 @@ class ClawOpsAgent:
         """다른 프로세스가 이 번호의 control 연결을 넘겨받았는가."""
         return self._taken_over
 
-    async def drain(self, *, timeout: float = DEFAULT_DRAIN_TIMEOUT_S) -> tuple[int, int]:
+    async def drain(
+        self, *, timeout: float = DEFAULT_DRAIN_TIMEOUT_S, release_slot: bool = True
+    ) -> tuple[int, int]:
         """새 콜 수신을 멈추고, 이미 진행 중인 통화가 끝나기를 기다린 뒤 종료한다.
 
         롤링 배포에 필요한 것이 이것이다. ``disconnect()`` 는 통화 도중에 끊는다 —
@@ -310,24 +446,35 @@ class ClawOpsAgent:
             timeout: 진행 중 통화를 기다리는 상한(초). 기본 120초. 이 시간이 지나도 남은
                 통화는 ``disconnect()`` 와 같은 방식으로 끊는다. 플랫폼 유예 시간을 이보다
                 길게 잡을 것 — 안 그러면 drain 도중 SIGKILL 로 의미가 사라진다.
+            release_slot: 배달 자리를 우리가 놓을지. 서버가 이미 인계 통지(`agent.retired`)를
+                보냈다면 자리는 이미 넘어갔으므로 **False** 로 두어 연결을 유지한다 — 그래야
+                진행 중이던 통화의 종료 이벤트가 이 연결로 돌아온다(`ended_duration` 포함).
+                인계 없이 우리가 먼저 내려가는 경우에만 True 다.
 
         Returns:
             (스스로 끝난 통화 수, 상한에 걸려 끊은 통화 수).
         """
-        # 배달 자리부터 내놓는다. 이 뒤에 도착하는 콜은 전부 다른 곳으로 간다.
-        self._control_given_up = True
-        if self._control_ws:
-            await self._control_ws.close()
-            self._control_ws = None
-        if self._control_ws_task and not self._control_ws_task.done():
-            self._control_ws_task.cancel()
-            self._control_ws_task = None
-        # 닫힌 제어 연결로는 종료 프레임이 올 수 없다 — 이미 기다리는 통화를 지금 깨운다.
-        # drain 중에 **나중에** 끝나는 통화는 _await_server_terminal 의 _control_given_up 검사가
-        # 맡는다. 그게 없으면 그 통화들은 아무도 못 깨우는 waiter 를 새로 등록하고
-        # 유예를 통째로 헛쓴다.
-        for waiter in list(self._terminal_waiters.values()):
-            waiter.set()
+        if release_slot:
+            # 배달 자리부터 내놓는다. 이 뒤에 도착하는 콜은 전부 다른 곳으로 간다.
+            self._control_given_up = True
+            if self._control_ws:
+                await self._control_ws.close()
+                self._control_ws = None
+            if self._control_ws_task and not self._control_ws_task.done():
+                self._control_ws_task.cancel()
+                self._control_ws_task = None
+            # 닫힌 제어 연결로는 종료 프레임이 올 수 없다 — 이미 기다리는 통화를 지금 깨운다.
+            # drain 중에 **나중에** 끝나는 통화는 _await_server_terminal 의 _control_given_up 검사가
+            # 맡는다. 그게 없으면 그 통화들은 아무도 못 깨우는 waiter 를 새로 등록하고
+            # 유예를 통째로 헛쓴다.
+            for waiter in list(self._terminal_waiters.values()):
+                waiter.set()
+        else:
+            # 자리는 서버가 이미 가져갔다(agent.retired). 연결은 그대로 둔다 — 진행 중이던
+            # 통화의 call.ended 가 이 연결로 돌아오고, 그래야 ended_duration 이 채워진다.
+            # 예전에는 여기서 무조건 끊었기 때문에 drain 중 끝난 통화의 duration 이 항상
+            # None 이었다.
+            log.info("자리는 이미 넘어갔다 — 연결을 유지한 채 진행 중 통화만 기다린다")
 
         in_flight = len(self._active_sessions)
         if in_flight == 0:
@@ -455,6 +602,7 @@ class ClawOpsAgent:
             on_call_ringing=self._handle_ringing,
             on_call_failed=self._handle_failed,
             on_terminal_close=self._handle_taken_over,
+            on_retired=self._handle_retired,
         )
         self._control_ws_task = asyncio.create_task(self._control_ws.connect())
         await self._control_ws.wait_connected()
