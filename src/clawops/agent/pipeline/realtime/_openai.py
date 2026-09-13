@@ -69,6 +69,7 @@ class OpenAIRealtimeConfig:
     language: str = "ko"
     turn_detection: RealtimeAudioInputTurnDetectionParam | None = None
     greeting: bool = True
+    transcription_prompt: str | None = None
 
 
 class OpenAIRealtime:
@@ -88,9 +89,17 @@ class OpenAIRealtime:
         language: str = "ko",
         turn_detection: RealtimeAudioInputTurnDetectionParam | None = None,
         greeting: bool = True,
+        transcription_prompt: str | None = None,
         tool_registry: ToolRegistry | None = None,
         recorder: AudioRecorder | None = None,
     ) -> None:
+        """
+        Args:
+            transcription_prompt: 발신자 음성 **전사**에 넘기는 어휘 힌트(자유 문장).
+                예: ``"재진, 초진, 예약 변경, 직원 연결"``. 전사 텍스트(``transcript`` 이벤트)의
+                정확도에만 영향을 주며, 모델이 오디오를 알아듣는 방식은 바뀌지 않는다 —
+                모델 쪽 어휘는 ``system_prompt`` 에 적는다.
+        """
         if not _HAS_OPENAI:
             raise ImportError("openai is required for OpenAIRealtime. Install it with: pip install clawops[openai]")
         if api_key is None:
@@ -112,6 +121,7 @@ class OpenAIRealtime:
             language=language,
             turn_detection=turn_detection,
             greeting=greeting,
+            transcription_prompt=transcription_prompt,
         )
         self._tools = tool_registry or ToolRegistry()
         self._builtin_tools: set[BuiltinTool] | None = None
@@ -198,6 +208,14 @@ class OpenAIRealtime:
         tool_schemas = self._current_tool_schemas()
         self._sent_tool_names = [str(t.get("name", "")) for t in tool_schemas]
 
+        transcription: dict[str, Any] = {
+            "model": "gpt-4o-transcribe",
+            "language": self._config.language,
+        }
+        # 빈 문자열은 보내지 않는다 — 안 준 것과 같게 둔다.
+        if self._config.transcription_prompt:
+            transcription["prompt"] = self._config.transcription_prompt
+
         await self._connection.session.update(
             session={
                 "type": "realtime",
@@ -207,10 +225,7 @@ class OpenAIRealtime:
                     "input": {
                         "format": {"type": "audio/pcmu"},
                         "noise_reduction": {"type": "near_field"},
-                        "transcription": {
-                            "model": "gpt-4o-transcribe",
-                            "language": self._config.language,
-                        },
+                        "transcription": transcription,
                         "turn_detection": self._config.turn_detection,
                     },
                     "output": {

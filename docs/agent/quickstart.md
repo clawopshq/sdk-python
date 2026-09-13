@@ -18,7 +18,7 @@ pip install clawops[agent,mcp]
 # 전체 설치
 pip install clawops[agent-all]
 
-# LiveKit Agents 실행 (실험적) — docs/agent/livekit.md 참조
+# LiveKit Agents 실행 — docs/agent/livekit.md 참조
 pip install 'clawops[livekit]'
 ```
 
@@ -78,6 +78,7 @@ agent = ClawOpsAgent(
         language="ko",
         turn_detection={"type": "semantic_vad", "eagerness": "medium"},
         greeting=True,
+        transcription_prompt="재진, 초진, 예약 변경",  # 전사 어휘 힌트 (전사 텍스트에만 영향)
     ),
 
     # 인증 (환경변수 대체 가능)

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.56.0 (2026-09-13)
+
+### Added
+- **전사 어휘 힌트 — `OpenAIRealtime(transcription_prompt=...)`.** 발신자 음성 전사에
+  어휘 힌트(자유 문장)를 넘깁니다. 병원 진료 용어·업무 용어처럼 일반 전사가 자주 틀리는
+  단어를 적어 두면 `transcript` 이벤트의 전사 텍스트가 그 어휘 쪽으로 맞춰집니다.
+
+  ```python
+  OpenAIRealtime(
+      system_prompt="...",
+      transcription_prompt="재진, 초진, 예약 변경, 직원 연결",
+  )
+  ```
+
+  - **전사 텍스트에만 영향을 줍니다.** 모델이 오디오를 알아듣는 방식은 바뀌지 않습니다 —
+    모델이 알아야 할 어휘는 `system_prompt` 에 함께 적어 주세요.
+  - 기본은 `None`(보내지 않음)이라 기존 동작은 그대로입니다. 빈 문자열도 보내지 않습니다.
+
+### Changed
+- **LiveKit Agents 실행(`clawops.agent.livekit.LiveKitSession`)이 정식 지원입니다.**
+  문서의 「실험적」 표기를 뗐습니다.
+
 ## 0.55.0 (2026-09-10)
 
 **배포에서 전화가 죽던 구간과, 배포가 통화를 끊던 구간이 둘 다 사라집니다.**
