@@ -242,6 +242,8 @@ class CallSession:
         caller_id: str | None = None,
         caller_id_mode: Literal["account", "original"] | None = None,
         timeout: int = 30,
+        failure_message: str | None = None,
+        failure_voice: str | None = None,
     ) -> dict:
         """Transfer the current call to a phone number or SIP endpoint.
 
@@ -261,6 +263,14 @@ class CallSession:
         ``caller_id`` 는 번호를 직접 주는 **지시**라 성격이 다르다. 허용 범위(계정 보유번호
         또는 KCT 직결 인입 통화의 발신자)를 벗어나면 전환 자체가 실패한다. 둘 다 주면
         ``caller_id`` 가 이기고 ``caller_id_mode`` 는 무시된다 — 우선순위 판단은 서버가 한다.
+
+        ``failure_message`` 는 전환이 연결되지 않았을 때(무응답·통화중·대상 실패) **발신자에게**
+        들려주고 끊을 문장이다. 주지 않으면 종전대로 아무 말 없이 끊긴다. ``whisper`` 와 듣는
+        사람이 반대다 — 저건 전화를 받은 담당자에게만 들린다.
+
+        ⚠️ ``after_transfer="return"`` 에서는 재생되지 않는다. 그 모드는 AI 가 통화를 이어받으므로
+        무엇을 말할지는 당신 코드가 정한다. 다만 이어받을 채널이 사라져 서버가 ``terminate`` 로
+        내려앉힌 통화에서는 재생된다 — 그게 발신자가 무음에 남는 경우다.
         """
         if not self._transfer_fn:
             raise RuntimeError("transfer not available")
@@ -284,6 +294,12 @@ class CallSession:
         # 안 주면 키를 붙이지 않는다 — 구 서버와 기존 동작을 그대로 둔다(additive).
         if caller_id_mode is not None:
             payload["callerIdMode"] = caller_id_mode
+        # 같은 이유로 안 주면 키 자체를 안 붙인다. 빈 문자열도 보내지 않는다 — 서버도 막지만
+        # 빈 문장을 합성하러 왕복시킬 이유가 없다.
+        if failure_message:
+            payload["failureMessage"] = failure_message
+        if failure_voice:
+            payload["failureVoice"] = failure_voice
         return await self._transfer_fn(payload)
 
     async def send_dtmf_sequence(self, digits: str) -> None:
