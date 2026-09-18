@@ -169,9 +169,10 @@ class ClawOpsPhoneTools(Toolset):
             after_transfer: terminate(기본, AI 세션 종료) 또는 return(전환 종료 후 AI 복귀)
             whisper: warm 모드에서 대상에게 먼저 들려줄 안내 문구
             caller_id_mode: 전환받는 쪽에 표시할 번호를 **의도**로 지정.
-                account(기본과 같음, 계정 번호) 또는 original(원 발신자 승계 선호 —
-                승계할 수 없는 통화면 계정 번호로 내려앉고 전환은 성사된다).
-            caller_id: 표시할 번호를 **직접** 지정. 계정 보유번호이거나 그 통화의 원
+                account(기본과 같음, 계정 번호) 또는 original(걸려온 통화의 발신자
+                번호를 표시하려는 선호 — 표시할 수 없는 통화면 계정 번호로 내려앉고
+                전환은 성사된다).
+            caller_id: 표시할 번호를 **직접** 지정. 계정 보유번호이거나 그 통화의
                 발신자여야 하고, 벗어나면 전환 자체가 실패한다. 웬만하면
                 caller_id_mode 를 쓴다. 둘 다 주면 caller_id 가 이긴다.
             timeout: 전환 대상 응답 대기 시간(초)
