@@ -23,6 +23,16 @@ _PY_TYPE_TO_JSON: dict[type, str] = {
 }
 
 
+def _param_annotations(fn: Callable[..., Any]) -> dict[str, Any]:
+    """return 을 뺀 파라미터 어노테이션.
+
+    inspect.get_annotations 는 3.10+ 라 쓰지 않는다 — requires-python 은 >=3.9 다
+    (clawops#1252). 함수·바운드 메서드에서는 __annotations__ 와 같은 값이다.
+    """
+    ann = getattr(fn, "__annotations__", None) or {}
+    return {k: v for k, v in ann.items() if k != "return"}
+
+
 @dataclass
 class FunctionTool:
     name: str
@@ -39,7 +49,7 @@ class ToolRegistry:
 
     def register(self, fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
         sig = inspect.signature(fn)
-        hints = {k: v for k, v in inspect.get_annotations(fn).items() if k != "return"}
+        hints = _param_annotations(fn)
 
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -116,7 +126,7 @@ class ToolRegistry:
         if name not in self._tools:
             raise KeyError(f"Tool not found: {name}")
         tool = self._tools[name]
-        hints = {k: v for k, v in inspect.get_annotations(tool.handler).items() if k != "return"}
+        hints = _param_annotations(tool.handler)
         converted = {}
         for k, v in arguments.items():
             target_type = hints.get(k, str)
