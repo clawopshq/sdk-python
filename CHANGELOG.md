@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.57.1 (2026-09-25)
+
+### Fixed
+- ⛔ **Python 3.9·3.10 에서 `clawops.agent` 를 import 하는 순간 실패하던 것.**
+  패키지는 `Requires-Python: >=3.9` 로 배포되는데, 에이전트 모듈이 3.11 부터 있는
+  `enum.StrEnum` 과 3.10 부터 있는 `dataclass(slots=True)` 를 쓰고 있었습니다.
+  0.14.4 부터 0.57.0 까지 해당합니다. `import clawops` 와 REST 클라이언트는 영향이
+  없었습니다.
+
+  이제 3.9 부터 선언대로 동작합니다. `BuiltinTool` 은 `str` 을 상속한 `Enum` 이 되었고
+  `str(BuiltinTool.HANG_UP) == "hang_up"` 등 동작은 그대로입니다. CI 가 3.9 에서
+  `clawops.agent` 하위 모듈을 전부 import 해 보도록 넓혀 같은 일이 되풀이되지 않게 했습니다.
+
 ## 0.57.0 (2026-09-18)
 
 ### Added
