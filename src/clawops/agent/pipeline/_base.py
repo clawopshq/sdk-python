@@ -50,7 +50,8 @@ class Session(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
+# slots=True 는 3.10+ 라 쓰지 않는다 — requires-python 은 >=3.9 다(clawops#1252).
+@dataclass(frozen=True)
 class SpeechEvent:
     """STT 이벤트.
 

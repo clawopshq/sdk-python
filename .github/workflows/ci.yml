@@ -54,7 +54,15 @@ jobs:
       # pyproject 가 >=3.9 를 약속하는데 나머지 job 은 3.12 로만 돈다.
       # pydantic 은 모델 어노테이션을 **런타임에** 평가하므로, 모델 안에 3.10+
       # 문법(`X | None`)을 쓰면 3.9 에서 import 자체가 죽는다 — 타입체크로는
-      # 잡히지 않는다. agent extra 없이 REST 표면만 세운다.
+      # 잡히지 않는다.
+      #
+      # ⚠️ 예전엔 REST 표면만 세웠다. 그 사이 `clawops.agent` 가 StrEnum(3.11+)·
+      # dataclass(slots=True)(3.10+)를 들여 0.14.4~0.57.0 내내 3.10 이하에서
+      # import 가 죽었는데 이 job 은 초록이었다(clawops#1252). 그래서 agent 하위
+      # 모듈을 **전부** 걷는다 — 새 모듈을 추가해도 목록을 고칠 필요가 없다.
+      #
+      # REST 표면은 **agent extra 없이** 먼저 세운다 — `import clawops` 가 aiohttp
+      # 같은 선택 의존성 없이도 되는지가 이 단계가 지키는 약속이다.
       - run: pip install -e .
       - run: |
           python -c "
@@ -66,3 +74,33 @@ jobs:
               getattr(t, name)
           print('ok', clawops.__version__)
           "
+      - run: pip install -e ".[agent]"
+      - name: import clawops.agent (하위 모듈 전부)
+        run: |
+          python -c "
+          import importlib, pkgutil, sys
+          import clawops.agent as agent
+          # 선택 extra(livekit 등)는 이 job 에 깔지 않는다(livekit-agents 는 3.10+ 라
+          # 3.9 에 깔리지도 않는다). 그 모듈이 없어서 나는 ModuleNotFoundError 만
+          # 봐준다 — 그 밖의 예외는 전부 실패다.
+          OPTIONAL = {'livekit'}
+          bad = []
+          # onerror: 하위 패키지를 걷다 난 예외는 아래 루프가 이미 기록했다 — 여기서
+          # 다시 터뜨리면 앞서 모은 FAIL 목록을 못 찍고 죽는다.
+          for m in pkgutil.walk_packages(agent.__path__, 'clawops.agent.', onerror=lambda name: None):
+              try:
+                  importlib.import_module(m.name)
+              except ModuleNotFoundError as e:
+                  if (e.name or '').split('.')[0] not in OPTIONAL:
+                      bad.append((m.name, repr(e)))
+              except Exception as e:
+                  bad.append((m.name, repr(e)))
+          for name, err in bad:
+              print('FAIL', name, err)
+          sys.exit(1 if bad else 0)
+          "
+      # import 만으로는 3.10+ **런타임** API 를 못 잡는다 — `inspect.get_annotations`
+      # (3.10+)는 import 는 통과하고 `@agent.tool` 을 붙이는 순간 죽었다(clawops#1252).
+      # 외부 SDK 없이 도는 도구 등록·호출 테스트를 3.9 에서 실제로 돌린다.
+      - run: pip install "pytest>=7.0" "pytest-asyncio>=0.21"
+      - run: pytest tests/agent/test_tool.py -q
