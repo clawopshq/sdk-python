@@ -83,6 +83,11 @@ def _warn_if_plaintext(url: str) -> None:
         )
 
 
+def _redact_url(url: str) -> str:
+    """로그용 URL — query·fragment(1회용 ``token``)를 떼어 낸다."""
+    return urlparse(url)._replace(query="", fragment="").geturl()
+
+
 class MediaWebSocket:
     """통화 하나의 미디어 스트림.
 
@@ -119,7 +124,7 @@ class MediaWebSocket:
             self._url,
             heartbeat=MEDIA_WS_HEARTBEAT_S,
         )
-        log.info(f"Media WS connected: {self._url}")
+        log.info("Media WS connected: %s", _redact_url(self._url))
         self._send_task = asyncio.create_task(self._send_loop())
 
         try:

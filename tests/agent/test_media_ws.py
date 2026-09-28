@@ -194,3 +194,26 @@ def test_plaintext_public_url_warns(caplog):
         _warn_if_plaintext("ws://localhost:3100/v1/agent/media/CA1?token=t")
         _warn_if_plaintext("wss://api.claw-ops.com/v1/agent/media/CA1?token=t")
     assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_connected_log_omits_token(monkeypatch, caplog):
+    """연결 로그에 URL 의 1회용 token(query)을 남기지 않는다."""
+    import clawops.agent._media_ws as media_ws_mod
+
+    session = _RecordingSession()
+    monkeypatch.setattr(media_ws_mod.aiohttp, "ClientSession", lambda: session)
+    ws = MediaWebSocket(
+        url="wss://api.claw-ops.com/v1/agent/media/CA1?token=secret-token-123&node=n1#frag",
+        on_audio=AsyncMock(),
+        on_start=AsyncMock(),
+        on_stop=AsyncMock(),
+    )
+    with caplog.at_level("DEBUG", logger="clawops.agent"):
+        try:
+            await ws.connect()
+        except Exception:
+            pass
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("wss://api.claw-ops.com/v1/agent/media/CA1" in m for m in messages)
+    assert not any("secret-token-123" in m or "token=" in m or "frag" in m for m in messages)
