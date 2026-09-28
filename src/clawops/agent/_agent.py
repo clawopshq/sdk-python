@@ -913,7 +913,6 @@ class ClawOpsAgent:
 
             media_ws = MediaWebSocket(
                 url=media_url,
-                api_key=self._api_key,
                 on_audio=on_audio,
                 on_start=lambda info: self._on_media_start(call, info),
                 on_stop=lambda: self._on_media_stop(call, session),
