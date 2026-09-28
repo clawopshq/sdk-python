@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from typing import Any, Callable, Awaitable
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -68,19 +69,39 @@ def parse_dtmf_event(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _warn_if_plaintext(url: str) -> None:
+    """공개 호스트로 가는 ``ws://`` 면 경고한다 — 연결은 막지 않는다(로컬 하네스는 평문을 쓴다)."""
+    parsed = urlparse(url)
+    if parsed.scheme == "ws" and parsed.hostname not in _LOOPBACK_HOSTS:
+        log.warning(
+            "Media WS URL is plaintext (ws://%s); the call token travels unencrypted. "
+            "ClawOps sends wss:// URLs — check what rewrote this one.",
+            parsed.hostname,
+        )
+
+
 class MediaWebSocket:
+    """통화 하나의 미디어 스트림.
+
+    인증은 서버가 준 URL 의 1회용 ``token`` 하나다. ``api_key`` 는 호환을 위해 받기만 하고
+    쓰지 않는다 — 예전엔 ``Authorization: Bearer`` 로 실었지만 서버는 그 헤더를 읽은 적이
+    없고, 서버가 ``ws://`` 를 주던 동안엔 계정 API 키가 평문 첫 요청에 실려 나갔다(clawops#1250).
+    """
+
     def __init__(
         self,
         *,
         url: str,
-        api_key: str,
+        api_key: str | None = None,
         on_audio: Callable[[bytes, int], Awaitable[None]],
         on_start: Callable[[dict[str, Any]], Awaitable[None]],
         on_stop: Callable[[], Awaitable[None]],
         on_dtmf: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._url = url
-        self._api_key = api_key
         self._on_audio = on_audio
         self._on_start = on_start
         self._on_stop = on_stop
@@ -92,10 +113,10 @@ class MediaWebSocket:
         self._mark_waiters: dict[str, asyncio.Event] = {}
 
     async def connect(self) -> None:
+        _warn_if_plaintext(self._url)
         self._session = aiohttp.ClientSession()
         self._ws = await self._session.ws_connect(
             self._url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
             heartbeat=MEDIA_WS_HEARTBEAT_S,
         )
         log.info(f"Media WS connected: {self._url}")
