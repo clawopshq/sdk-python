@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.59.0 (2026-09-29)
+
+### Added
+- **수신 통화의 발신번호 표시제한 여부 — `call.caller_id_restricted`.** 발신자가 번호
+  표시제한(`*23#` 등)을 걸고 건 수신 통화면 `True` 입니다. 번호는 지금처럼 `call.from_number`
+  에 그대로 전달되고, 표시제한 여부만 이 값으로 알 수 있습니다.
+
+  ```python
+  @agent.on("call_start")
+  async def on_start(call):
+      if call.caller_id_restricted:
+          ...  # 발신자가 번호를 숨기려 한 통화 — 되걸기·번호 저장 전에 확인
+  ```
+
+  - 통신사가 표시제한 여부를 보내지 않은 통화와 발신 통화는 `False` 입니다.
+  - 이 값을 보내기 전의 서버에 연결하면 항상 `False` 입니다.
+- 통화 조회(`calls.get`·`calls.list`) 모델 `Call` 에 `caller_id_restricted`(`bool | None`) 를
+  추가했습니다. 발신 통화와 2026-09-29 이전의 수신 통화는 `None` 입니다.
+
 ## 0.58.0 (2026-09-29)
 
 ### Added
