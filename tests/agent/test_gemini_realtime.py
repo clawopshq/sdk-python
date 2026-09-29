@@ -89,11 +89,56 @@ async def test_gemini_sdk_start_connects():
     # Stage 3 필드가 포함되지 않았는지 확인
     assert "context_window_compression" not in config
     assert "realtime_input_config" not in config
+    assert "thinking_config" not in config
 
     # 인사 메시지 전송 확인
     mock_live_session.send_realtime_input.assert_called_once()
 
     # cleanup
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_gemini_sdk_thinking_config_passthrough():
+    """thinking_config 는 해석하지 않고 connect config 에 그대로 실린다.
+
+    gemini-3.8-live-extended-thinking 은 thinking_level 이 없으면 연결을 거절한다.
+    """
+    thinking = {"thinking_level": "LOW"}
+    session = GeminiRealtime(
+        api_key="AIza-test",
+        model="gemini-3.8-live-extended-thinking",
+        thinking_config=thinking,
+        greeting=False,
+    )
+
+    mock_live_session = AsyncMock()
+
+    async def _empty_iter():
+        session._session = None
+        if False:
+            yield
+
+    mock_live_session.receive = _empty_iter
+
+    mock_ctx = AsyncMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_live_session)
+    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    captured_kwargs: dict = {}
+
+    def capture_connect(**kwargs):
+        captured_kwargs.update(kwargs)
+        return mock_ctx
+
+    session._client = MagicMock()
+    session._client.aio.live.connect = capture_connect
+
+    await session.start(MagicMock())
+
+    assert captured_kwargs["model"] == "gemini-3.8-live-extended-thinking"
+    assert captured_kwargs["config"]["thinking_config"] == thinking
+
     await session.stop()
 
 

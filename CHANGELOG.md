@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.58.0 (2026-09-29)
+
+### Added
+- **Gemini thinking 설정 — `GeminiRealtime(thinking_config=...)`.**
+  `gemini-3.8-live-extended-thinking` 은 생각 수준(`thinking_level`)이 없으면 세션을 열 때
+  `Thinking level must be specified for this model.` 로 거절됩니다. 지금까지는 이 값을 넘길 방법이
+  없어 이 모델을 쓸 수 없었습니다. 값은 해석하지 않고 Gemini 에 그대로 넘기며, 지정하지 않으면
+  보내지 않습니다(기존 동작 그대로).
+
+  ```python
+  GeminiRealtime(
+      model="gemini-3.8-live-extended-thinking",
+      thinking_config={"thinking_level": "LOW"},
+  )
+  ```
+
+  받는 값은 모델마다 다릅니다 — `gemini-3.8-live` 는 `thinking_level` 을 거절합니다.
+  모델별 표는 `docs/agent/quickstart.md` 에 있습니다.
+
 ## 0.57.2 (2026-09-28)
 
 ### Security
