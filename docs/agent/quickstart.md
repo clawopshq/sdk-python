@@ -146,6 +146,43 @@ agent = ClawOpsAgent(
 | --- | --- | --- |
 | `realtime_input_config` | `dict` | Gemini VAD 설정. `automatic_activity_detection`, `activity_handling`, `turn_coverage` 등을 포함. |
 
+#### 모델과 thinking 설정
+
+`model` 에는 Gemini Live API 모델명을 그대로 넣습니다. 새 모델이 나와도 SDK 업데이트 없이 이름만 바꾸면 됩니다.
+
+```python
+session=GeminiRealtime(
+    system_prompt="상담원입니다.",
+    model="gemini-3.8-live",
+)
+```
+
+`gemini-3.8-live-extended-thinking` 처럼 생각 수준을 요구하는 모델은 `thinking_config` 로 넘깁니다.
+구조는 [google-genai SDK의 `ThinkingConfig`](https://ai.google.dev/gemini-api/docs/thinking)를 그대로 따릅니다.
+
+```python
+session=GeminiRealtime(
+    system_prompt="상담원입니다.",
+    model="gemini-3.8-live-extended-thinking",
+    thinking_config={"thinking_level": "LOW"},
+)
+```
+
+| 파라미터 | 타입 | 설명 |
+| --- | --- | --- |
+| `thinking_config` | `dict` | Gemini thinking 설정. `thinking_level`, `thinking_budget` 등을 포함. 지정하지 않으면 보내지 않습니다. |
+
+받는 값은 모델마다 다릅니다(2026-09-29 확인).
+
+| 모델 | `thinking_config` |
+| --- | --- |
+| `gemini-3.8-live-extended-thinking` | `thinking_level` 필수 — `LOW`·`MEDIUM`·`HIGH` (`MINIMAL` 은 거절) |
+| `gemini-3.8-live` | `thinking_level` 은 거절, `thinking_budget` 만 받음. 보통은 지정하지 않습니다 |
+| `gemini-3.1-flash-live-preview` | `thinking_level`·`thinking_budget` 모두 받음 |
+
+모델이 받지 않는 값을 넣으면 세션을 열 때 Gemini 가 거절 사유와 함께 실패합니다.
+생각 수준을 높일수록 응답 전 대기가 길어지므로, 전화 상담에서는 `LOW` 부터 시작하는 것을 권장합니다.
+
 ### 음성 옵션
 
 | 음성     | 특징                         |

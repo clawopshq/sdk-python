@@ -147,6 +147,7 @@ class GeminiRealtime:
         tool_registry: ToolRegistry | None = None,
         recorder: AudioRecorder | None = None,
         realtime_input_config: dict[str, Any] | None = None,
+        thinking_config: dict[str, Any] | None = None,
     ) -> None:
         if not _HAS_GENAI:
             raise ImportError(
@@ -164,6 +165,7 @@ class GeminiRealtime:
         self._builtin_tools: set[BuiltinTool] | None = None
         self._recorder = recorder
         self._realtime_input_config = realtime_input_config
+        self._thinking_config = thinking_config
 
         self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
         self._live_ctx: Any | None = None  # async context manager
@@ -228,6 +230,12 @@ class GeminiRealtime:
 
         if self._realtime_input_config:
             config["realtime_input_config"] = self._realtime_input_config
+
+        # 모델마다 받는 키가 다르다(2026-09-29 실측): gemini-3.8-live-extended-thinking 은
+        # thinking_level(LOW·MEDIUM·HIGH)이 없으면 연결을 거절하고, gemini-3.8-live 는
+        # thinking_level 을 거절하고 thinking_budget 만 받는다. 그래서 값을 해석하지 않고 그대로 넘긴다.
+        if self._thinking_config:
+            config["thinking_config"] = self._thinking_config
 
         if self._system_prompt:
             config["system_instruction"] = types.Content(
