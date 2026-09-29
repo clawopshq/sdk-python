@@ -778,6 +778,8 @@ class ClawOpsAgent:
             to_number=self._from_number,
             account_id=self._account_id,
             direction="inbound",
+            # 이 필드를 모르는 서버는 키를 보내지 않는다 — bool True 가 아니면 False.
+            caller_id_restricted=data.get("callerIdRestricted") is True,
         )
 
         for event, handlers in self._event_handlers.items():

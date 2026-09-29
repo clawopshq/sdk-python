@@ -61,6 +61,7 @@ async def on_failed(call, reason):
 | `to_number` | `str` | 수신 번호 |
 | `account_id` | `str` | 계정 ID |
 | `direction` | `str` | `"inbound"` 또는 `"outbound"` |
+| `caller_id_restricted` | `bool` | 수신 통화에서 발신자가 번호 표시제한(`*23#` 등)을 걸고 건 통화면 `True`. 번호는 `from_number` 에 그대로 전달됩니다. 통신사가 표시제한 여부를 보내지 않은 통화와 발신 통화는 `False` |
 | `status` | `str` | 현재 상태. 아래 표 참고 |
 | `ended_status` | `str \| None` | 종료 사유. 통화가 끝나기 전에는 `None` |
 | `ended_duration` | `int \| None` | **서버가 확정한 통화 시간(초).** 아래 설명 참고 |

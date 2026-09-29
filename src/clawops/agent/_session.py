@@ -35,12 +35,17 @@ class CallSession:
         to_number: str,
         account_id: str,
         direction: str = "inbound",
+        caller_id_restricted: bool = False,
     ) -> None:
         self.call_id = call_id
         self.from_number = from_number
         self.to_number = to_number
         self.account_id = account_id
         self.direction = direction
+        # 수신 통화에서 발신자가 번호 표시제한(`*23#` 등)을 걸고 건 통화면 True. 번호는
+        # from_number 에 그대로 있고 여부만 여기서 알 수 있다. 통신사가 표시제한 여부를 보내지
+        # 않은 통화와 발신 통화는 False.
+        self.caller_id_restricted = caller_id_restricted
         self.status: str = "queued" if direction == "outbound" else "ringing"
         # 서버가 통보한 최종 종료 상태. 통화가 끝나기 전에는 None.
         # completed(성사) / no-answer / busy / rejected / canceled / failed.

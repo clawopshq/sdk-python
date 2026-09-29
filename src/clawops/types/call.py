@@ -46,6 +46,9 @@ class Call(BaseModel):
         sip_response_code: 종료를 유발한 SIP 응답코드. 404=없는 번호, 486=통화중,
             500=망 오류 등. 응답코드 없이 끝났으면 None. 국내 통신망은 실제 사유를
             500 으로 감싸 보내기도 하므로 hangup_cause 가 더 정확하다.
+        caller_id_restricted: 수신 통화에서 발신자가 번호 표시제한(`*23#` 등)을 걸고 건
+            통화면 True, 아니면 False. 번호는 from_ 에 그대로 있다. 발신 통화와
+            2026-09-29 이전의 수신 통화는 None.
         hangup_source: 종료 책임 주체. carrier(통신망) / callee(수신자) /
             caller(발신자) / app·system(ClawOps 측 오류 — 수신자 번호를 정제
             대상에 넣지 말고 재시도할 것).
@@ -69,6 +72,7 @@ class Call(BaseModel):
     duration: Optional[int] = None
     recording_url: Optional[str] = None
     answered_by: Optional[Literal["human", "machine", "unknown"]] = None
+    caller_id_restricted: Optional[bool] = None
     # 종료 사유는 Literal 로 좁히지 않는다 — 통신망이 새 cause 를 보내면 서버가 enum 을
     # 넓히는데, 클라이언트가 그때마다 릴리즈되어야 파싱되는 구조는 안 된다.
     hangup_cause: Optional[str] = None
