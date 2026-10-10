@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 try:
@@ -21,16 +22,46 @@ except ImportError:
     types = None  # type: ignore[assignment]
     _HAS_GENAI = False
 
-from ..._audio import ulaw_to_pcm16, pcm16_to_ulaw, resample_pcm16
+from ..._audio import pcm16_to_ulaw, resample_pcm16, ulaw_to_pcm16
 from ..._builtin_tools import BuiltinTool
 from ..._hold_audio import HoldAudioPlayer
 from ..._recorder import AudioRecorder
 from ..._session import CallSession
 from ..._tool import ToolRegistry
-from ...tracing._spans import tool_call_span, llm_session_span
-from .._builtin_tool_schemas import get_builtin_tool_schemas, execute_builtin_tool, BUILTIN_TOOL_NAMES
+from ...tracing._spans import llm_session_span, tool_call_span
+from .._builtin_tool_schemas import BUILTIN_TOOL_NAMES, execute_builtin_tool, get_builtin_tool_schemas
 
 log = logging.getLogger("clawops.agent")
+
+TOOL_BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
+"""Gemini Live 함수 선언의 ``behavior`` 허용값."""
+
+_TRACE_ENABLED = os.environ.get("CLAWOPS_GEMINI_DEBUG", "").lower() in ("1", "true", "yes")
+"""``CLAWOPS_GEMINI_DEBUG=1`` 이면 Live 서버 메시지를 한 줄씩 INFO 로 남긴다(오디오는 바이트 수만)."""
+
+
+def is_extended_thinking_model(model: str) -> bool:
+    return "extended-thinking" in model
+
+
+def default_tool_behavior(model: str) -> str | None:
+    """모델별 함수 호출 ``behavior`` 기본값.
+
+    - ``gemini-3.8-live-extended-thinking`` 은 NON_BLOCKING 만 받고 BLOCKING 은 하드 에러다.
+    - ``gemini-3.8-live`` 는 서버 기본값이 NON_BLOCKING 으로 바뀌었다(모델 페이지 「Migrating from
+      Gemini 3.1 Flash Live」). behavior 를 안 보내면 서버는 도구를 비동기로 돌려, 도구 결과를
+      기다리는 동안 모델이 계속 말한다. 전화 SDK 는 결과를 기다리는 동안 모델이 말하지 않아야
+      하므로 BLOCKING 을 명시해 3.1 과 같은 동작을 복원한다.
+    - 그 외(3.1 등)는 보내지 않는다(서버 기본값 = 동기).
+
+    LiveKit `livekit-plugins-google` 의 `_default_tool_behavior` 와 같은 자리이되, 기본값 방향은
+    반대다(LiveKit 은 3.8 에 NON_BLOCKING 을 명시한다).
+    """
+    if is_extended_thinking_model(model):
+        return "NON_BLOCKING"
+    if "3.8" in model:
+        return "BLOCKING"
+    return None
 
 
 def _resolve_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any]:
@@ -148,6 +179,9 @@ class GeminiRealtime:
         recorder: AudioRecorder | None = None,
         realtime_input_config: dict[str, Any] | None = None,
         thinking_config: dict[str, Any] | None = None,
+        proactive_audio: bool | None = None,
+        tool_behavior: str | None = None,
+        api_version: str | None = None,
     ) -> None:
         if not _HAS_GENAI:
             raise ImportError(
@@ -166,8 +200,20 @@ class GeminiRealtime:
         self._recorder = recorder
         self._realtime_input_config = realtime_input_config
         self._thinking_config = thinking_config
+        self._proactive_audio = proactive_audio
+        if tool_behavior is not None and tool_behavior not in TOOL_BEHAVIORS:
+            raise ValueError(f"tool_behavior must be one of {TOOL_BEHAVIORS}, got {tool_behavior!r}")
+        self._tool_behavior = tool_behavior
+        self._api_version = api_version
 
-        self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
+        client_kwargs: dict[str, Any] = {}
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        if api_version:
+            # 기본값은 v1beta. proactivity 등 일부 기능은 다른 버전을 요구할 수 있어 그대로 넘긴다.
+            client_kwargs["http_options"] = {"api_version": api_version}
+        self._client = genai.Client(**client_kwargs)
+        self._trace_t0: float = time.monotonic()
         self._live_ctx: Any | None = None  # async context manager
         self._session: Any | None = None  # AsyncLiveSession
         from .._buffering_call import _BufferingCall as _BC
@@ -237,6 +283,11 @@ class GeminiRealtime:
         if self._thinking_config:
             config["thinking_config"] = self._thinking_config
 
+        # 3.8 두 모델은 proactive audio 가 영구 ON 이라 False 를 보내면 거절되고, 3.1 은 미지원이다.
+        # 값을 해석하지 않고 그대로 넘긴다 — 모델별 표는 docs/agent/quickstart.md.
+        if self._proactive_audio is not None:
+            config["proactivity"] = {"proactive_audio": self._proactive_audio}
+
         if self._system_prompt:
             config["system_instruction"] = types.Content(
                 parts=[types.Part(text=self._system_prompt)],
@@ -252,7 +303,23 @@ class GeminiRealtime:
             model=self._model,
             config=config,
         )
+        self._trace_t0 = time.monotonic()
+        self._trace("connect", model=self._model, tool_behavior=self.effective_tool_behavior())
         return await self._live_ctx.__aenter__()
+
+    def effective_tool_behavior(self) -> str | None:
+        """이 세션의 함수 선언에 실리는 ``behavior``. 지정이 없으면 모델별 기본값."""
+        if self._tool_behavior is not None:
+            return self._tool_behavior
+        return default_tool_behavior(self._model)
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        """``CLAWOPS_GEMINI_DEBUG=1`` 일 때만 서버·클라이언트 이벤트를 한 줄로 남긴다."""
+        if not _TRACE_ENABLED:
+            return
+        elapsed_ms = int((time.monotonic() - self._trace_t0) * 1000)
+        kv = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+        log.info("[gemini-trace] +%dms %s %s", elapsed_ms, event, kv)
 
     async def prewarm(self) -> None:
         """Gemini Live 세션 prewarm — CallSession 없이 호출 가능."""
@@ -359,6 +426,9 @@ class GeminiRealtime:
         if not self._call:
             return
 
+        if _TRACE_ENABLED:
+            self._trace_response(response)
+
         server_content = getattr(response, "server_content", None)
         if server_content:
             # ── 오디오 응답 ──
@@ -409,6 +479,41 @@ class GeminiRealtime:
             log.info(f"Gemini tool call cancelled: {ids}")
             self._pending_tool_call = None
 
+    def _trace_response(self, response: Any) -> None:
+        sc = getattr(response, "server_content", None)
+        if sc:
+            audio_bytes = 0
+            model_turn = getattr(sc, "model_turn", None)
+            if model_turn:
+                for part in getattr(model_turn, "parts", None) or []:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        audio_bytes += len(inline.data)
+            it = getattr(sc, "input_transcription", None)
+            ot = getattr(sc, "output_transcription", None)
+            self._trace(
+                "server_content",
+                audio_bytes=audio_bytes or None,
+                turn_complete=True if getattr(sc, "turn_complete", False) else None,
+                turn_complete_reason=getattr(sc, "turn_complete_reason", None),
+                generation_complete=True if getattr(sc, "generation_complete", False) else None,
+                waiting_for_input=True if getattr(sc, "waiting_for_input", False) else None,
+                interrupted=True if getattr(sc, "interrupted", False) else None,
+                input_transcript=repr(it.text) if it and getattr(it, "text", None) else None,
+                output_transcript=repr(ot.text) if ot and getattr(ot, "text", None) else None,
+            )
+        tc = getattr(response, "tool_call", None)
+        if tc:
+            calls = [
+                f"{getattr(fc, 'name', '')}#{getattr(fc, 'id', '')}" for fc in getattr(tc, "function_calls", None) or []
+            ]
+            self._trace("tool_call", calls=",".join(calls))
+        cancel = getattr(response, "tool_call_cancellation", None)
+        if cancel:
+            self._trace("tool_call_cancellation", ids=",".join(getattr(cancel, "ids", None) or []))
+        if getattr(response, "go_away", None):
+            self._trace("go_away", time_left=getattr(response.go_away, "time_left", None))
+
     async def _handle_audio_data(self, audio_data: bytes) -> None:
         """PCM16 24kHz raw bytes → G.711 ulaw 8kHz 변환 후 전송."""
         if not self._call:
@@ -425,6 +530,7 @@ class GeminiRealtime:
         for off in range(0, full_end, chunk_size):
             if not self._first_audio_logged:
                 from .._buffering_call import log_first_realtime_audio
+
                 log_first_realtime_audio(self._call)
                 self._first_audio_logged = True
             await self._call.send_audio(ulaw[off : off + chunk_size])
@@ -496,12 +602,17 @@ class GeminiRealtime:
                 await player.stop()
 
         if responses:
+            self._trace("tool_response", names=",".join(r.name or "" for r in responses))
             await self._session.send_tool_response(
                 function_responses=responses,
             )
 
     def _build_tool_schemas(self) -> list[dict[str, Any]]:
-        """ToolRegistry의 스키마를 Gemini functionDeclarations 형식으로 변환."""
+        """ToolRegistry의 스키마를 Gemini functionDeclarations 형식으로 변환.
+
+        ``behavior`` 는 세션의 :meth:`effective_tool_behavior` 를 모든 선언(커스텀·MCP·내장)에
+        같이 싣는다. 값이 None 이면 키를 넣지 않는다(서버 기본값).
+        """
         openai_tools = self._tools.to_openai_tools()
         declarations = []
         for tool in openai_tools:
@@ -515,6 +626,10 @@ class GeminiRealtime:
                 }
             )
         declarations.extend(get_builtin_tool_schemas(self._builtin_tools, fmt="gemini"))
+        behavior = self.effective_tool_behavior()
+        if behavior:
+            for decl in declarations:
+                decl["behavior"] = behavior
         return declarations
 
     async def stop(self) -> None:
