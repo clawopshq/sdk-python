@@ -3,16 +3,33 @@
 OpenAI Realtime API의 tool 스키마를 자동 생성하고,
 등록된 핸들러를 이름으로 호출한다.
 """
+
 from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable
 
 from .._exceptions import AgentError
 
 log = logging.getLogger("clawops.agent")
+
+TOOL_BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
+"""도구 선언의 ``behavior``(Gemini Live). BLOCKING=결과를 받을 때까지 모델이 기다림, NON_BLOCKING=도구가
+도는 동안 모델이 계속 대화."""
+
+TOOL_SCHEDULINGS = ("SILENT", "WHEN_IDLE", "INTERRUPT")
+"""NON_BLOCKING 도구 결과를 모델이 어떻게 다룰지(Gemini Live ``FunctionResponse.scheduling``).
+SILENT=말하지 않고 기억만, WHEN_IDLE=지금 말을 마친 뒤 전달(서버 기본값), INTERRUPT=즉시 끼어들어 전달."""
+
+
+def _validate_tool_options(behavior: str | None, scheduling: str | None) -> None:
+    if behavior is not None and behavior not in TOOL_BEHAVIORS:
+        raise ValueError(f"behavior must be one of {TOOL_BEHAVIORS}, got {behavior!r}")
+    if scheduling is not None and scheduling not in TOOL_SCHEDULINGS:
+        raise ValueError(f"scheduling must be one of {TOOL_SCHEDULINGS}, got {scheduling!r}")
 
 
 _PY_TYPE_TO_JSON: dict[type, str] = {
@@ -40,6 +57,10 @@ class FunctionTool:
     parameters: dict[str, Any]
     required: list[str]
     handler: Callable[..., Awaitable[str]]
+    behavior: str | None = None
+    """Gemini Live 함수 선언 ``behavior``. None 이면 세션 기본값(모델별)을 따른다."""
+    scheduling: str | None = None
+    """NON_BLOCKING 결과의 ``scheduling``. None 이면 세션 기본값, 그것도 없으면 서버 기본값(WHEN_IDLE)."""
 
 
 class ToolRegistry:
@@ -47,7 +68,25 @@ class ToolRegistry:
         self._tools: dict[str, FunctionTool] = {}
         self._mcp_tools: dict[str, tuple[Any, dict[str, Any]]] = {}
 
-    def register(self, fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+    def register(
+        self,
+        fn: Callable[..., Awaitable[str]] | None = None,
+        *,
+        behavior: str | None = None,
+        scheduling: str | None = None,
+    ) -> Any:
+        """도구를 등록한다. ``@registry.register`` 와 ``@registry.register(behavior=...)`` 둘 다 된다.
+
+        ``behavior``·``scheduling`` 은 Gemini Live 에서만 쓰이고 다른 세션은 무시한다.
+        """
+        _validate_tool_options(behavior, scheduling)
+        if fn is None:
+
+            def decorator(f: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+                return self.register(f, behavior=behavior, scheduling=scheduling)
+
+            return decorator
+
         sig = inspect.signature(fn)
         hints = _param_annotations(fn)
 
@@ -69,6 +108,8 @@ class ToolRegistry:
             parameters=properties,
             required=required,
             handler=fn,
+            behavior=behavior,
+            scheduling=scheduling,
         )
         self._tools[fn.__name__] = tool
         log.debug("Tool registered: %s (params: %s)", tool.name, list(properties.keys()))
@@ -89,7 +130,7 @@ class ToolRegistry:
             log.debug("Clearing %d MCP tools", len(self._mcp_tools))
         self._mcp_tools.clear()
 
-    def fork(self) -> "ToolRegistry":
+    def fork(self) -> ToolRegistry:
         """로컬 tool을 복사한 새 ToolRegistry를 반환 (MCP tool은 비어있음)."""
         copy = ToolRegistry()
         copy._tools = dict(self._tools)
@@ -104,16 +145,18 @@ class ToolRegistry:
     def to_openai_tools(self) -> list[dict[str, Any]]:
         result = []
         for tool in self._tools.values():
-            result.append({
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": tool.parameters,
-                    "required": tool.required,
-                },
-            })
+            result.append(
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": tool.parameters,
+                        "required": tool.required,
+                    },
+                }
+            )
         for _client, schema in self._mcp_tools.values():
             result.append(schema)
         return result
