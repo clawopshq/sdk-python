@@ -48,6 +48,51 @@ async def on_failed(call, reason):
 > `reason` 값은 `call.ended_status` 와 동일합니다. 자세한 의미는
 > [발신 결과 확인하기](quickstart.md#발신-결과-확인하기) 를 참고하세요.
 
+## 수신 통화 거절 — `@agent.on_incoming`
+
+수신 통화를 **받기 전에** 보고 거절할 수 있습니다. 거절한 통화는 응답 전에 끝나므로 요금이 붙지 않고,
+세션·미디어가 열리지 않으며 `call_start`/`call_end` 등 이벤트도 발화되지 않습니다.
+
+```python
+from clawops.agent import IncomingCall
+
+@agent.on_incoming
+async def screen(call: IncomingCall):
+    if call.caller_id_restricted:      # 번호 표시제한 통화
+        await call.reject()            # 거절(SIP 603)
+    elif call.from_number in blocklist:
+        await call.reject(reason="busy")  # 통화중으로 거절(SIP 486)
+    # reject() 를 부르지 않고 끝나면 평소대로 받습니다.
+```
+
+데코레이터 대신 `agent.on_incoming(screen)` 으로 등록해도 됩니다. 훅은 하나만 둘 수 있고, 다시 등록하면
+앞의 것을 바꿉니다. `async def` 와 일반 함수 둘 다 됩니다.
+
+### `IncomingCall`
+
+`CallSession` 이 아닙니다 — 받기 전이라 오디오를 보내거나 통화를 전환할 수 없습니다.
+
+| 속성·메서드 | 타입 | 설명 |
+|-------------|------|------|
+| `call_id` | `str` | 통화 ID |
+| `from_number` | `str` | 발신 번호. 번호 표시제한 통화도 번호는 그대로 옵니다 |
+| `to_number` | `str` | 수신 번호(이 에이전트의 번호) |
+| `caller_id_restricted` | `bool` | 발신자가 번호 표시제한을 걸고 건 통화면 `True` |
+| `reject(reason="rejected")` | | 거절합니다. `reason` 은 `"rejected"`(기본, SIP 603) 또는 `"busy"`(SIP 486). 그 밖의 값은 `ValueError` |
+
+### 결정 규칙
+
+| 훅의 결과 | 처리 |
+|-----------|------|
+| `reject()` 호출 | 그 즉시 거절합니다. 훅이 뒤에 더 일해도 기다리지 않습니다 |
+| `reject()` 없이 끝남 | 받습니다 (훅이 없을 때와 같음) |
+| 예외 발생 | 경고 로그를 남기고 **받습니다** |
+| 5초 안에 결정 없음 | 경고 로그를 남기고 **받습니다**. 그 뒤의 `reject()` 는 경고만 남기고 무시됩니다 |
+| 훅 등록 안 함 | 지금까지와 똑같이 받습니다 |
+
+선별 코드에 문제가 생겨도 전화를 놓치지 않도록, 결정하지 못한 통화는 받는 쪽으로 처리합니다.
+`reject()` 를 두 번 불러도 첫 결정이 유지됩니다. 훅이 도는 사이 발신자가 끊으면 아무 일도 하지 않습니다.
+
 ## CallSession
 
 개별 통화의 상태를 관리합니다. 이벤트 핸들러의 `call` 파라미터로 전달됩니다.
