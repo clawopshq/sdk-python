@@ -180,6 +180,9 @@ class GeminiRealtime:
         tool_behavior: str | None = None,
         tool_response_scheduling: str | None = None,
         api_version: str | None = None,
+        context_window_compression: dict[str, Any] | None = None,
+        session_resumption: bool = True,
+        reconnect_max_attempts: int = 3,
     ) -> None:
         if not _HAS_GENAI:
             raise ImportError(
@@ -215,6 +218,16 @@ class GeminiRealtime:
         # 진행 중인 NON_BLOCKING 도구 태스크. tool_call_cancellation 의 id 로 취소한다.
         self._inflight: dict[str, asyncio.Task[Any]] = {}
         self._scheduling_dropped_warned = False
+        # ── 세션 수명(LiveKit livekit-plugins-google 의 처리를 이식) ──
+        # Gemini Live 는 WebSocket 연결이 약 10분에서 끝나고(끝나기 전 go_away), 압축 없는 오디오 세션은
+        # 15분에서 끝난다. 접속 때마다 session_resumption 핸들을 보내 서버가 주는 새 핸들을 보관하고,
+        # go_away·예기치 않은 끊김에서 그 핸들로 다시 접속해 대화를 이어 간다.
+        self._context_window_compression = context_window_compression
+        self._session_resumption = session_resumption
+        self._reconnect_max_attempts = max(0, int(reconnect_max_attempts))
+        self._resumption_handle: str | None = None
+        self._reconnect_lock = asyncio.Lock()
+        self._stopping = False
 
         client_kwargs: dict[str, Any] = {}
         if api_key:
@@ -223,7 +236,7 @@ class GeminiRealtime:
             # 기본값은 v1beta. proactivity 등 일부 기능은 다른 버전을 요구할 수 있어 그대로 넘긴다.
             client_kwargs["http_options"] = {"api_version": api_version}
         self._client = genai.Client(**client_kwargs)
-        self._trace_t0: float = time.monotonic()
+        self._trace_t0: float | None = None
         self._live_ctx: Any | None = None  # async context manager
         self._session: Any | None = None  # AsyncLiveSession
         from .._buffering_call import _BufferingCall as _BC
@@ -303,6 +316,15 @@ class GeminiRealtime:
                 parts=[types.Part(text=self._system_prompt)],
             )
 
+        # 압축을 켜지 않은 오디오 세션은 15분에서 끝난다(공식 문서). 값은 해석하지 않고 그대로 넘긴다 —
+        # 긴 통화에는 {"sliding_window": {}} 를 권장(docs/agent/quickstart.md).
+        if self._context_window_compression is not None:
+            config["context_window_compression"] = self._context_window_compression
+
+        # 핸들이 None 이어도 보내야 서버가 session_resumption_update 로 새 핸들을 준다.
+        if self._session_resumption:
+            config["session_resumption"] = {"handle": self._resumption_handle}
+
         if tool_schemas:
             config["tools"] = [{"function_declarations": tool_schemas}]
 
@@ -313,8 +335,14 @@ class GeminiRealtime:
             model=self._model,
             config=config,
         )
-        self._trace_t0 = time.monotonic()
-        self._trace("connect", model=self._model, tool_behavior=self.effective_tool_behavior())
+        if self._trace_t0 is None:
+            self._trace_t0 = time.monotonic()
+        self._trace(
+            "connect",
+            model=self._model,
+            tool_behavior=self.effective_tool_behavior(),
+            resume=bool(self._resumption_handle),
+        )
         return await self._live_ctx.__aenter__()
 
     def effective_tool_behavior(self) -> str | None:
@@ -365,7 +393,7 @@ class GeminiRealtime:
         """``CLAWOPS_GEMINI_DEBUG=1`` 일 때만 서버·클라이언트 이벤트를 한 줄로 남긴다."""
         if not _TRACE_ENABLED:
             return
-        elapsed_ms = int((time.monotonic() - self._trace_t0) * 1000)
+        elapsed_ms = int((time.monotonic() - (self._trace_t0 or time.monotonic())) * 1000)
         kv = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
         log.info("[gemini-trace] +%dms %s %s", elapsed_ms, event, kv)
 
@@ -377,6 +405,9 @@ class GeminiRealtime:
         self._audio_remainder = b""
         self._first_audio_logged = False
         self._sent_audio_chunks = 0
+        self._stopping = False
+        self._resumption_handle = None
+        self._trace_t0 = None
 
         self._llm_span_ctx = llm_session_span(self._model, system="google", voice=self._voice)
         self._llm_span = self._llm_span_ctx.__enter__()
@@ -443,32 +474,109 @@ class GeminiRealtime:
     _TOOL_DRAIN_TIMEOUT = 0.3
 
     async def _receive_loop(self) -> None:
-        if not self._session:
-            return
+        """세션이 바뀌어도(재접속) 살아 있는 수신 루프. 연결이 끊기면 재접속을 시도하고, 끝내 실패하면 끝난다."""
         try:
-            # SDK의 receive()는 turn_complete 시 iterator가 종료되므로
-            # 매 턴마다 다시 호출해야 한다.
-            while self._session:
-                self._pending_tool_call = None
-                it = self._session.receive().__aiter__()
+            while self._session and not self._stopping:
+                session = self._session
                 try:
-                    while True:
-                        if self._pending_tool_call:
-                            response = await asyncio.wait_for(it.__anext__(), timeout=self._TOOL_DRAIN_TIMEOUT)
-                        else:
-                            response = await it.__anext__()
-                        await self._handle_response(response)
-                except (StopAsyncIteration, asyncio.TimeoutError):
-                    pass
-                if self._pending_tool_call:
-                    await self._handle_tool_calls(self._pending_tool_call)
-                    self._pending_tool_call = None
+                    await self._receive_turns(session)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — 연결 끊김은 어떤 예외로도 온다
+                    if self._stopping:
+                        break
+                    if self._session is not session:
+                        # go_away 재접속이 이미 세션을 바꿨다 — 옛 연결이 닫히며 난 예외는 정상이다.
+                        continue
+                    log.warning(f"Gemini receive error: {e}")
+                    if not await self._reconnect(f"receive error: {e}"):
+                        break
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            log.error(f"Gemini receive error: {e}")
         finally:
             await self._cleanup()
+
+    async def _receive_turns(self, session: Any) -> None:
+        """한 연결에서 턴을 계속 읽는다. SDK 의 receive() 는 turn_complete 에서 끝나므로 매 턴 다시 부른다.
+
+        ``self._session`` 이 다른 연결로 바뀌면(재접속) 현재 턴을 마친 뒤 돌아간다.
+        """
+        while self._session is session and not self._stopping:
+            self._pending_tool_call = None
+            it = session.receive().__aiter__()
+            try:
+                while True:
+                    if self._pending_tool_call:
+                        response = await asyncio.wait_for(it.__anext__(), timeout=self._TOOL_DRAIN_TIMEOUT)
+                    else:
+                        response = await it.__anext__()
+                    await self._handle_response(response)
+            except (StopAsyncIteration, asyncio.TimeoutError):
+                pass
+            if self._pending_tool_call:
+                await self._handle_tool_calls(self._pending_tool_call)
+                self._pending_tool_call = None
+
+    async def _reconnect(self, reason: str) -> bool:
+        """같은 대화를 새 연결로 이어 간다(session_resumption 핸들). 성공하면 True.
+
+        실패가 상한에 닿으면 통화에 ``session_lost`` 를 알리고 끊는다 — 모델만 사라진 채 통화가
+        무음으로 이어지는 것이 가장 나쁜 실패이기 때문이다.
+        """
+        if self._stopping:
+            return False
+        if self._reconnect_lock.locked():
+            return True  # 이미 다른 경로가 재접속 중
+        async with self._reconnect_lock:
+            old_ctx, old_session = self._live_ctx, self._session
+            self._session = None  # 그동안 feed_audio 는 조용히 버린다
+            self._trace("reconnect", reason=reason, handle=bool(self._resumption_handle))
+            log.info("Gemini Live reconnecting (%s, resume=%s)", reason, bool(self._resumption_handle))
+            last_error: Exception | None = None
+            for attempt in range(1, self._reconnect_max_attempts + 1):
+                try:
+                    new_session = await asyncio.wait_for(self._open_live_session(), timeout=15.0)
+                except Exception as e:  # noqa: BLE001 — 재접속 실패 사유는 그대로 기록만 한다
+                    last_error = e
+                    log.warning(
+                        "Gemini Live reconnect attempt %d/%d failed: %s", attempt, self._reconnect_max_attempts, e
+                    )
+                    await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 2.0))
+                    continue
+                self._session = new_session
+                self._pending_tool_call = None
+                self._audio_remainder = b""
+                if old_ctx is not None and old_session is not new_session:
+                    try:
+                        await asyncio.wait_for(old_ctx.__aexit__(None, None, None), timeout=2.0)
+                    except Exception as e:  # noqa: BLE001 — 옛 연결 정리 실패는 치명적이지 않다
+                        log.debug(f"Gemini old connection close: {e}")
+                self._trace("reconnected", attempt=attempt)
+                log.info("Gemini Live reconnected (attempt %d)", attempt)
+                return True
+            self._live_ctx = old_ctx  # 정리 대상으로 남긴다
+            await self._on_session_lost(
+                f"{reason}; reconnect failed after {self._reconnect_max_attempts} attempts: {last_error}"
+            )
+            return False
+
+    async def _on_session_lost(self, reason: str) -> None:
+        """재접속을 포기했다. 통화 쪽에 알리고 끊는다(무음 방치 금지)."""
+        from .._buffering_call import _BufferingCall
+
+        self._trace("session_lost", reason=reason)
+        log.error("Gemini Live session lost: %s — hanging up", reason)
+        call = self._call
+        if call is None or isinstance(call, _BufferingCall):
+            return
+        try:
+            await call._emit("session_lost", reason)
+        except Exception as e:  # noqa: BLE001 — 핸들러 실패가 hangup 을 막으면 안 된다
+            log.error(f"session_lost handler failed: {e}")
+        try:
+            await call.hangup()
+        except Exception as e:  # noqa: BLE001
+            log.error(f"hangup after session loss failed: {e}")
 
     async def _handle_response(self, response: Any) -> None:
         if not self._call:
@@ -520,6 +628,18 @@ class GeminiRealtime:
                 if text:
                     log.debug(f"[Transcript] assistant: {text}")
                     await self._call._emit("transcript", "assistant", text)
+
+        # ── 세션 수명 ──
+        upd = getattr(response, "session_resumption_update", None)
+        if upd is not None and getattr(upd, "resumable", False) and getattr(upd, "new_handle", None):
+            self._resumption_handle = upd.new_handle
+            self._trace("session_resumption_update", handle=upd.new_handle[:12] + "…")
+
+        go_away = getattr(response, "go_away", None)
+        if go_away is not None and not self._stopping:
+            log.info("Gemini go_away received (time_left=%s) — reconnecting", getattr(go_away, "time_left", None))
+            task = asyncio.create_task(self._reconnect("go_away"))
+            self._tasks.append(task)
 
         # ── Tool call ──
         tool_call = getattr(response, "tool_call", None)
@@ -758,6 +878,7 @@ class GeminiRealtime:
         return declarations
 
     async def stop(self) -> None:
+        self._stopping = True
         # cancel 후 gather 로 수거 — 안 하면 receive loop 의 예외가 retrieve 되지 않아
         # "Task exception was never retrieved" 경고가 발생한다 (특히 prewarm 창이 길 때).
         self._cancel_inflight(list(self._inflight))

@@ -660,3 +660,123 @@ async def test_generation_complete_flushes_audio_remainder():
     (frame,) = session._call.send_audio.call_args.args
     assert len(frame) == 160 and frame.startswith(b"\x01" * 10)
     assert session._audio_remainder == b""
+
+
+# ── 세션 수명: session_resumption · go_away 재접속 · session_lost (0.62.0) ──────────
+
+
+def _lifecycle_msg(**fields):
+    base = {
+        "server_content": None,
+        "tool_call": None,
+        "tool_call_cancellation": None,
+        "session_resumption_update": None,
+        "go_away": None,
+    }
+    base.update(fields)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_connect_config_sends_session_resumption_by_default():
+    session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live", greeting=False)
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert captured["config"]["session_resumption"] == {"handle": None}
+    assert "context_window_compression" not in captured["config"]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_resumption_can_be_disabled_and_compression_passthrough():
+    compression = {"sliding_window": {}}
+    session = GeminiRealtime(
+        api_key="AIza-test",
+        model="gemini-3.8-live",
+        greeting=False,
+        session_resumption=False,
+        context_window_compression=compression,
+    )
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert "session_resumption" not in captured["config"]
+    assert captured["config"]["context_window_compression"] == compression
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_resumption_update_stores_handle_and_go_away_reconnects_with_it():
+    session = _runtime_session()
+    old_ctx = AsyncMock()
+    session._live_ctx = old_ctx
+    old_session = session._session
+    new_session = AsyncMock()
+    opened: list[str | None] = []
+
+    async def fake_open():
+        opened.append(session._resumption_handle)
+        return new_session
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+
+    await session._handle_response(
+        _lifecycle_msg(session_resumption_update=SimpleNamespace(resumable=True, new_handle="h-123"))
+    )
+    assert session._resumption_handle == "h-123"
+
+    await session._handle_response(_lifecycle_msg(go_away=SimpleNamespace(time_left="10s")))
+    await _settle(10)
+    assert opened == ["h-123"]  # 새 접속은 보관한 핸들로
+    assert session._session is new_session and session._session is not old_session
+    old_ctx.__aexit__.assert_awaited_once()
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_reconnects_when_connection_drops():
+    session = _runtime_session()
+
+    class FirstSession:
+        async def receive(self):
+            raise ConnectionError("1011 going away")
+            yield  # pragma: no cover
+
+    second = AsyncMock()
+
+    async def _second_receive():
+        session._stopping = True  # 한 번 돈 뒤 루프를 끝낸다
+        if False:
+            yield
+
+    second.receive = _second_receive
+    session._session = FirstSession()
+    session._open_live_session = AsyncMock(return_value=second)  # type: ignore[method-assign]
+
+    await session._receive_loop()
+    session._open_live_session.assert_awaited_once()
+    assert session._session is second
+    session._call.hangup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_failure_emits_session_lost_and_hangs_up():
+    session = _runtime_session(reconnect_max_attempts=1)
+    session._open_live_session = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+    session._call.hangup = AsyncMock()
+
+    ok = await session._reconnect("test")
+    assert ok is False
+    session._call._emit.assert_awaited()
+    event, reason = session._call._emit.call_args.args
+    assert event == "session_lost" and "boom" in reason
+    session._call.hangup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_go_away_ignored_while_stopping():
+    session = _runtime_session()
+    session._stopping = True
+    session._open_live_session = AsyncMock()  # type: ignore[method-assign]
+    await session._handle_response(_lifecycle_msg(go_away=SimpleNamespace(time_left="1s")))
+    await _settle()
+    session._open_live_session.assert_not_called()
