@@ -1,4 +1,5 @@
 # tests/agent/test_gemini_realtime.py
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -240,8 +241,17 @@ def test_tool_schemas_extended_thinking_is_non_blocking():
 
 def test_explicit_tool_behavior_overrides_model_default():
     session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live", tool_behavior="NON_BLOCKING")
+
+    @session._tools.register
+    async def lookup(order_id: str) -> str:
+        """조회"""
+        return "ok"
+
     assert session.effective_tool_behavior() == "NON_BLOCKING"
-    assert all(d["behavior"] == "NON_BLOCKING" for d in session._build_tool_schemas())
+    by_name = {d["name"]: d for d in session._build_tool_schemas()}
+    assert by_name["lookup"]["behavior"] == "NON_BLOCKING"
+    # 내장 도구(통화 제어)는 세션 기본값이 NON_BLOCKING 이어도 BLOCKING 을 지킨다.
+    assert by_name["hang_up"]["behavior"] == "BLOCKING"
 
 
 def test_invalid_tool_behavior_raises():
@@ -295,3 +305,358 @@ def test_api_version_reaches_genai_client(monkeypatch):
     seen.clear()
     GeminiRealtime(api_key="AIza-test")
     assert "http_options" not in seen
+
+
+# ── 도구별 behavior/scheduling + NON_BLOCKING 런타임 (0.61.0) ────────────────────
+from types import SimpleNamespace
+
+from google.genai import types as genai_types
+
+from clawops.agent._tool import ToolRegistry
+
+
+def _runtime_session(model: str = "gemini-3.8-live", **kwargs) -> GeminiRealtime:
+    """연결 없이 수신 경로만 시험할 세션. _build_tool_schemas 로 선언 표를 채운 뒤 돌려준다."""
+    session = GeminiRealtime(api_key="AIza-test", model=model, greeting=False, **kwargs)
+    session._session = AsyncMock()
+    call = MagicMock()
+    call._emit = AsyncMock()
+    call.send_audio = AsyncMock()
+    call.clear_audio = AsyncMock()
+    session._call = call
+    return session
+
+
+def _tool_call_msg(*calls: genai_types.FunctionCall):
+    return SimpleNamespace(
+        server_content=None,
+        tool_call=genai_types.LiveServerToolCall(function_calls=list(calls)),
+        tool_call_cancellation=None,
+    )
+
+
+async def _settle(n: int = 5) -> None:
+    for _ in range(n):
+        await asyncio.sleep(0)
+
+
+def test_registry_register_accepts_behavior_and_scheduling_in_both_decorator_forms():
+    registry = ToolRegistry()
+
+    @registry.register
+    async def plain(x: str) -> str:
+        """plain"""
+        return x
+
+    @registry.register(behavior="NON_BLOCKING", scheduling="INTERRUPT")
+    async def async_tool(x: str) -> str:
+        """async"""
+        return x
+
+    assert registry["plain"].behavior is None and registry["plain"].scheduling is None
+    assert registry["async_tool"].behavior == "NON_BLOCKING"
+    assert registry["async_tool"].scheduling == "INTERRUPT"
+    # OpenAI 스키마에는 새 필드가 새지 않는다.
+    assert all("behavior" not in t and "scheduling" not in t for t in registry.to_openai_tools())
+
+
+def test_registry_rejects_bad_behavior_or_scheduling():
+    registry = ToolRegistry()
+    with pytest.raises(ValueError, match="behavior"):
+        registry.register(behavior="ASYNC")
+    with pytest.raises(ValueError, match="scheduling"):
+        registry.register(scheduling="LATER")
+
+
+def test_agent_tool_decorator_both_forms():
+    from clawops.agent import ClawOpsAgent
+
+    agent = ClawOpsAgent(
+        api_key="ck_test",
+        account_id="ACtest",
+        from_="07012341234",
+        session=GeminiRealtime(api_key="AIza-test"),
+    )
+
+    @agent.tool
+    async def a(x: str) -> str:
+        """a"""
+        return x
+
+    @agent.tool(behavior="NON_BLOCKING")
+    async def b(x: str) -> str:
+        """b"""
+        return x
+
+    assert agent._tool_registry["a"].behavior is None
+    assert agent._tool_registry["b"].behavior == "NON_BLOCKING"
+
+
+def test_per_tool_behavior_overrides_session_default():
+    session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live")
+
+    @session._tools.register(behavior="NON_BLOCKING", scheduling="WHEN_IDLE")
+    async def save_note(text: str) -> str:
+        """메모 저장"""
+        return "saved"
+
+    @session._tools.register
+    async def lookup(order_id: str) -> str:
+        """조회"""
+        return "ok"
+
+    by_name = {d["name"]: d for d in session._build_tool_schemas()}
+    assert by_name["save_note"]["behavior"] == "NON_BLOCKING"
+    assert by_name["lookup"]["behavior"] == "BLOCKING"
+    assert by_name["hang_up"]["behavior"] == "BLOCKING"
+    assert session._declared_scheduling["save_note"] == "WHEN_IDLE"
+
+
+def test_extended_thinking_forces_non_blocking_even_when_tool_asks_blocking(caplog):
+    session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live-extended-thinking")
+
+    @session._tools.register(behavior="BLOCKING")
+    async def lookup(order_id: str) -> str:
+        """조회"""
+        return "ok"
+
+    with caplog.at_level("WARNING"):
+        by_name = {d["name"]: d for d in session._build_tool_schemas()}
+    assert by_name["lookup"]["behavior"] == "NON_BLOCKING"
+    assert by_name["hang_up"]["behavior"] == "NON_BLOCKING"
+    assert any("accepts NON_BLOCKING only" in r.message for r in caplog.records)
+
+
+def test_invalid_tool_response_scheduling_raises():
+    with pytest.raises(ValueError, match="tool_response_scheduling"):
+        GeminiRealtime(api_key="AIza-test", tool_response_scheduling="LATER")
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_tool_runs_without_blocking_receive_and_replies_when_done():
+    session = _runtime_session()
+    gate = asyncio.Event()
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def slow(x: str) -> str:
+        """slow"""
+        await gate.wait()
+        return "done"
+
+    session._build_tool_schemas()
+    await session._handle_response(_tool_call_msg(genai_types.FunctionCall(name="slow", id="c1", args={"x": "1"})))
+
+    # drain 대기 묶음에 들어가지 않고 즉시 태스크로 떴다.
+    assert session._pending_tool_call is None
+    assert "c1" in session._inflight
+
+    # 도구가 도는 동안 수신 경로는 살아 있다 — 전사가 그대로 전달된다.
+    await session._handle_response(
+        SimpleNamespace(
+            server_content=SimpleNamespace(
+                model_turn=None,
+                turn_complete=False,
+                generation_complete=False,
+                interrupted=False,
+                input_transcription=None,
+                output_transcription=SimpleNamespace(text="잠시만요"),
+            ),
+            tool_call=None,
+            tool_call_cancellation=None,
+        )
+    )
+    session._call._emit.assert_awaited_with("transcript", "assistant", "잠시만요")
+    session._session.send_tool_response.assert_not_called()
+
+    gate.set()
+    await _settle()
+    session._session.send_tool_response.assert_awaited_once()
+    (resp,) = session._session.send_tool_response.call_args.kwargs["function_responses"]
+    assert resp.id == "c1" and resp.name == "slow"
+    assert resp.response == {"result": "done"}
+    assert resp.scheduling is None  # 결과가 있고 따로 정한 값이 없으면 서버 기본값(WHEN_IDLE)
+    assert "c1" not in session._inflight
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_tool_without_result_is_sent_silent():
+    session = _runtime_session()
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def fire_and_forget(x: str):
+        """결과 없음"""
+        return
+
+    session._build_tool_schemas()
+    await session._handle_response(
+        _tool_call_msg(genai_types.FunctionCall(name="fire_and_forget", id="c2", args={"x": "1"}))
+    )
+    await _settle()
+    (resp,) = session._session.send_tool_response.call_args.kwargs["function_responses"]
+    assert resp.response == {"result": "ok"}
+    assert resp.scheduling == "SILENT"
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_scheduling_precedence_tool_then_session():
+    session = _runtime_session(tool_response_scheduling="WHEN_IDLE")
+
+    @session._tools.register(behavior="NON_BLOCKING", scheduling="INTERRUPT")
+    async def urgent(x: str) -> str:
+        """urgent"""
+        return "r"
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def normal(x: str) -> str:
+        """normal"""
+        return "r"
+
+    session._build_tool_schemas()
+    await session._handle_response(
+        _tool_call_msg(
+            genai_types.FunctionCall(name="urgent", id="u", args={"x": "1"}),
+            genai_types.FunctionCall(name="normal", id="n", args={"x": "1"}),
+        )
+    )
+    await _settle()
+    sent = {
+        r.name: r.scheduling
+        for c in session._session.send_tool_response.call_args_list
+        for r in c.kwargs["function_responses"]
+    }
+    assert sent == {"urgent": "INTERRUPT", "normal": "WHEN_IDLE"}
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_extended_thinking_never_sends_scheduling(caplog):
+    session = _runtime_session(model="gemini-3.8-live-extended-thinking", tool_response_scheduling="SILENT")
+
+    @session._tools.register
+    async def note(x: str):
+        """note"""
+        return
+
+    session._build_tool_schemas()
+    with caplog.at_level("WARNING"):
+        await session._handle_response(_tool_call_msg(genai_types.FunctionCall(name="note", id="e1", args={"x": "1"})))
+        await _settle()
+    (resp,) = session._session.send_tool_response.call_args.kwargs["function_responses"]
+    assert resp.scheduling is None
+    assert any("rejects FunctionResponse.scheduling" in r.message for r in caplog.records)
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_cancellation_cancels_inflight_and_sends_nothing():
+    session = _runtime_session()
+    gate = asyncio.Event()
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def slow(x: str) -> str:
+        """slow"""
+        await gate.wait()
+        return "done"
+
+    session._build_tool_schemas()
+    await session._handle_response(_tool_call_msg(genai_types.FunctionCall(name="slow", id="c1", args={"x": "1"})))
+    await _settle()
+    task = session._inflight["c1"]
+
+    await session._handle_response(
+        SimpleNamespace(server_content=None, tool_call=None, tool_call_cancellation=SimpleNamespace(ids=["c1"]))
+    )
+    await _settle()
+    assert task.cancelled()
+    assert "c1" not in session._inflight
+    gate.set()
+    await _settle()
+    session._session.send_tool_response.assert_not_called()
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_blocking_tool_still_goes_through_drain_path():
+    session = _runtime_session()
+
+    @session._tools.register
+    async def lookup(x: str) -> str:
+        """lookup"""
+        return "ok"
+
+    session._build_tool_schemas()
+    msg = _tool_call_msg(genai_types.FunctionCall(name="lookup", id="b1", args={"x": "1"}))
+    await session._handle_response(msg)
+    assert session._pending_tool_call is msg.tool_call
+    assert not session._inflight
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_mixed_tool_call_splits_blocking_and_non_blocking():
+    session = _runtime_session()
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def note(x: str) -> str:
+        """note"""
+        return "saved"
+
+    @session._tools.register
+    async def lookup(x: str) -> str:
+        """lookup"""
+        return "ok"
+
+    session._build_tool_schemas()
+    await session._handle_response(
+        _tool_call_msg(
+            genai_types.FunctionCall(name="note", id="n1", args={"x": "1"}),
+            genai_types.FunctionCall(name="lookup", id="l1", args={"x": "1"}),
+        )
+    )
+    assert [fc.name for fc in session._pending_tool_call.function_calls] == ["lookup"]
+    await _settle()
+    assert session._session.send_tool_response.await_count == 1
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_response_omits_id_when_server_sent_none():
+    session = _runtime_session()
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def note(x: str) -> str:
+        """note"""
+        return "saved"
+
+    session._build_tool_schemas()
+    await session._handle_response(_tool_call_msg(genai_types.FunctionCall(name="note", args={"x": "1"})))
+    await _settle()
+    (resp,) = session._session.send_tool_response.call_args.kwargs["function_responses"]
+    assert resp.id is None
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_generation_complete_flushes_audio_remainder():
+    session = _runtime_session()
+    session._audio_remainder = b"\x01" * 10
+    await session._handle_response(
+        SimpleNamespace(
+            server_content=SimpleNamespace(
+                model_turn=None,
+                turn_complete=False,
+                generation_complete=True,
+                interrupted=False,
+                input_transcription=None,
+                output_transcription=None,
+            ),
+            tool_call=None,
+            tool_call_cancellation=None,
+        )
+    )
+    session._call.send_audio.assert_awaited_once()
+    (frame,) = session._call.send_audio.call_args.args
+    assert len(frame) == 160 and frame.startswith(b"\x01" * 10)
+    assert session._audio_remainder == b""

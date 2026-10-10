@@ -27,14 +27,11 @@ from ..._builtin_tools import BuiltinTool
 from ..._hold_audio import HoldAudioPlayer
 from ..._recorder import AudioRecorder
 from ..._session import CallSession
-from ..._tool import ToolRegistry
+from ..._tool import TOOL_BEHAVIORS, TOOL_SCHEDULINGS, ToolRegistry
 from ...tracing._spans import llm_session_span, tool_call_span
 from .._builtin_tool_schemas import BUILTIN_TOOL_NAMES, execute_builtin_tool, get_builtin_tool_schemas
 
 log = logging.getLogger("clawops.agent")
-
-TOOL_BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
-"""Gemini Live 함수 선언의 ``behavior`` 허용값."""
 
 _TRACE_ENABLED = os.environ.get("CLAWOPS_GEMINI_DEBUG", "").lower() in ("1", "true", "yes")
 """``CLAWOPS_GEMINI_DEBUG=1`` 이면 Live 서버 메시지를 한 줄씩 INFO 로 남긴다(오디오는 바이트 수만)."""
@@ -181,6 +178,7 @@ class GeminiRealtime:
         thinking_config: dict[str, Any] | None = None,
         proactive_audio: bool | None = None,
         tool_behavior: str | None = None,
+        tool_response_scheduling: str | None = None,
         api_version: str | None = None,
     ) -> None:
         if not _HAS_GENAI:
@@ -204,7 +202,19 @@ class GeminiRealtime:
         if tool_behavior is not None and tool_behavior not in TOOL_BEHAVIORS:
             raise ValueError(f"tool_behavior must be one of {TOOL_BEHAVIORS}, got {tool_behavior!r}")
         self._tool_behavior = tool_behavior
+        if tool_response_scheduling is not None and tool_response_scheduling not in TOOL_SCHEDULINGS:
+            raise ValueError(
+                f"tool_response_scheduling must be one of {TOOL_SCHEDULINGS}, got {tool_response_scheduling!r}"
+            )
+        self._tool_response_scheduling = tool_response_scheduling
         self._api_version = api_version
+        # 선언 시점에 확정한 도구별 behavior·scheduling. 응답을 보낼 때 같은 값을 읽는다(LiveKit 과
+        # 같은 원칙: 선언과 scheduling 판정이 한 값을 읽어야 「서버는 비동기인데 우리는 동기」가 안 생긴다).
+        self._declared_behavior: dict[str, str | None] = {}
+        self._declared_scheduling: dict[str, str | None] = {}
+        # 진행 중인 NON_BLOCKING 도구 태스크. tool_call_cancellation 의 id 로 취소한다.
+        self._inflight: dict[str, asyncio.Task[Any]] = {}
+        self._scheduling_dropped_warned = False
 
         client_kwargs: dict[str, Any] = {}
         if api_key:
@@ -308,10 +318,48 @@ class GeminiRealtime:
         return await self._live_ctx.__aenter__()
 
     def effective_tool_behavior(self) -> str | None:
-        """이 세션의 함수 선언에 실리는 ``behavior``. 지정이 없으면 모델별 기본값."""
+        """이 세션의 함수 선언 기본 ``behavior``. 지정이 없으면 모델별 기본값. 도구별 값이 이를 덮는다."""
         if self._tool_behavior is not None:
             return self._tool_behavior
         return default_tool_behavior(self._model)
+
+    def _behavior_for(self, name: str, requested: str | None, *, builtin: bool) -> str | None:
+        """선언 하나에 실을 behavior 를 정한다.
+
+        - extended-thinking 은 NON_BLOCKING 만 받으므로 무엇을 요청해도 NON_BLOCKING(요청이 BLOCKING 이면 경고).
+        - 내장 도구(hang_up·collect_dtmf·send_dtmf·transfer_call)는 통화 제어라 항상 BLOCKING —
+          NON_BLOCKING 이면 모델이 끊기·전환 중에도 말을 이어 가 음성이 잘린다.
+        - 그 외는 도구별 요청 → 세션 기본값 순.
+        """
+        if is_extended_thinking_model(self._model):
+            if requested == "BLOCKING":
+                log.warning(
+                    "tool %s requested BLOCKING but %s accepts NON_BLOCKING only — declaring NON_BLOCKING",
+                    name,
+                    self._model,
+                )
+            return "NON_BLOCKING"
+        if builtin:
+            return "BLOCKING" if self.effective_tool_behavior() else None
+        return requested or self.effective_tool_behavior()
+
+    def _scheduling_for(self, name: str, result_is_none: bool) -> str | None:
+        """응답에 실을 ``scheduling``. NON_BLOCKING 선언에만 의미가 있고 BLOCKING 엔 서버가 무시한다.
+
+        extended-thinking 은 scheduling 을 거절(1007 "Function response scheduling is not supported")하므로
+        절대 보내지 않는다. 결과가 None(=모델에 전할 말이 없음)이고 따로 정한 값이 없으면 SILENT.
+        """
+        if self._declared_behavior.get(name) != "NON_BLOCKING":
+            return None
+        requested = self._declared_scheduling.get(name) or self._tool_response_scheduling
+        if is_extended_thinking_model(self._model):
+            if requested and not self._scheduling_dropped_warned:
+                self._scheduling_dropped_warned = True
+                log.warning("%s rejects FunctionResponse.scheduling; dropping scheduling=%s", self._model, requested)
+            return None
+        if requested:
+            return requested
+        return "SILENT" if result_is_none else None
 
     def _trace(self, event: str, **fields: Any) -> None:
         """``CLAWOPS_GEMINI_DEBUG=1`` 일 때만 서버·클라이언트 이벤트를 한 줄로 남긴다."""
@@ -439,6 +487,12 @@ class GeminiRealtime:
                     if inline and "audio" in (getattr(inline, "mime_type", "") or ""):
                         await self._handle_audio_data(inline.data)
 
+            # 생성 완료 — 오디오는 이 시점에 다 왔다. turn_complete 는 모델이 「재생이 끝났다」고 믿는
+            # 시점까지 미뤄지고(모델은 실시간 재생을 가정) 3.8 에선 안 오기도 하므로 여기서도 flush 한다.
+            if getattr(server_content, "generation_complete", False):
+                log.debug("Gemini generation complete")
+                await self._flush_audio_remainder()
+
             # 턴 완료
             if getattr(server_content, "turn_complete", False):
                 log.debug("Gemini turn complete")
@@ -470,14 +524,62 @@ class GeminiRealtime:
         # ── Tool call ──
         tool_call = getattr(response, "tool_call", None)
         if tool_call:
-            self._pending_tool_call = tool_call
+            blocking = self._dispatch_tool_call(tool_call)
+            if blocking is not None:
+                self._pending_tool_call = blocking
 
         # ── Tool call cancellation ──
         tool_cancellation = getattr(response, "tool_call_cancellation", None)
         if tool_cancellation:
-            ids = getattr(tool_cancellation, "ids", [])
+            ids = list(getattr(tool_cancellation, "ids", None) or [])
             log.info(f"Gemini tool call cancelled: {ids}")
             self._pending_tool_call = None
+            self._cancel_inflight(ids)
+
+    def _dispatch_tool_call(self, tool_call: Any) -> Any | None:
+        """NON_BLOCKING 호출은 즉시 태스크로 띄우고, BLOCKING 호출만 묶어 돌려준다(drain 뒤 실행).
+
+        NON_BLOCKING 은 서버가 결과를 기다리지 않고 모델이 계속 말하므로 수신 루프를 막으면 안 되고,
+        hold audio 도 틀지 않는다(모델 음성과 겹친다).
+        """
+        function_calls = list(getattr(tool_call, "function_calls", None) or [])
+        blocking_calls = []
+        for fc in function_calls:
+            name = getattr(fc, "name", "")
+            if self._declared_behavior.get(name) == "NON_BLOCKING":
+                key = getattr(fc, "id", None) or f"{name}@{id(fc)}"
+                task = asyncio.create_task(self._run_async_tool(key, fc))
+                self._inflight[key] = task
+                self._tasks.append(task)
+            else:
+                blocking_calls.append(fc)
+        if not blocking_calls:
+            return None
+        if len(blocking_calls) == len(function_calls):
+            return tool_call
+        return types.LiveServerToolCall(function_calls=blocking_calls)
+
+    def _cancel_inflight(self, ids: list[str]) -> None:
+        for fc_id in ids:
+            task = self._inflight.pop(fc_id, None)
+            if task and not task.done():
+                task.cancel()
+
+    async def _run_async_tool(self, key: str, fc: Any) -> None:
+        """NON_BLOCKING 도구 하나를 실행하고 끝나는 즉시 응답을 보낸다. 취소되면 응답을 보내지 않는다."""
+        try:
+            resp = await self._execute_function_call(fc)
+            if resp is not None and self._session and self._inflight.get(key) is asyncio.current_task():
+                self._trace("tool_response", names=resp.name, scheduling=resp.scheduling, mode="non_blocking")
+                await self._session.send_tool_response(function_responses=[resp])
+        except asyncio.CancelledError:
+            log.info("NON_BLOCKING tool %s cancelled by server", getattr(fc, "name", ""))
+            raise
+        except Exception as e:
+            log.error(f"NON_BLOCKING tool task failed: {e}")
+        finally:
+            if self._inflight.get(key) is asyncio.current_task():
+                self._inflight.pop(key, None)
 
     def _trace_response(self, response: Any) -> None:
         sc = getattr(response, "server_content", None)
@@ -543,7 +645,53 @@ class GeminiRealtime:
             await self._call.send_audio(padded)
             self._audio_remainder = b""
 
+    class _HangUp(Exception):
+        """hang_up 내장 도구가 통화를 끊었다 — 더 보낼 응답이 없다."""
+
+    async def _execute_function_call(self, fc: Any) -> types.FunctionResponse | None:
+        """함수 호출 하나를 실행해 FunctionResponse 로 만든다. hang_up 이면 :class:`_HangUp`.
+
+        서버가 id 를 주지 않은 호출에는 id 를 돌려보내지 않는다(우리가 지어낸 id 는 서버가 모른다).
+        """
+        func_name = getattr(fc, "name", "")
+        fc_id = getattr(fc, "id", None) or None
+        args = getattr(fc, "args", None) or {}
+        log.info(f"Tool call: {func_name}({args})")
+
+        result: Any
+        if func_name in BUILTIN_TOOL_NAMES and self._call:
+            self._call.metrics.record_tool_call()
+            result = await execute_builtin_tool(func_name, args, self._call)
+            if result == "":  # hang_up
+                raise GeminiRealtime._HangUp()
+            if result is None:
+                return None
+        else:
+            if self._call:
+                self._call.metrics.record_tool_call()
+            source = "mcp" if func_name in self._tools._mcp_tools else "local"
+            with tool_call_span(func_name, source):
+                try:
+                    result = await self._tools.call(func_name, args)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.error(f"Tool call failed: {func_name}: {e}")
+                    if self._call:
+                        self._call.metrics.record_tool_error(e)
+                    result = f"Error: {e}"
+
+        # None=모델에 전할 말이 없다. NON_BLOCKING 이면 SILENT 로 보내 모델이 쓸데없이 답하지 않게 한다.
+        payload = {"result": "ok"} if result is None else {"result": str(result)}
+        return types.FunctionResponse(
+            id=fc_id,
+            name=func_name,
+            response=payload,
+            scheduling=self._scheduling_for(func_name, result is None),
+        )
+
     async def _handle_tool_calls(self, tool_call: Any) -> None:
+        """BLOCKING 호출 묶음을 실행한다. 모델이 결과를 기다리므로 그동안 hold audio 를 튼다."""
         function_calls = getattr(tool_call, "function_calls", [])
         responses: list[types.FunctionResponse] = []
 
@@ -555,54 +703,18 @@ class GeminiRealtime:
 
         try:
             for fc in function_calls:
-                func_name = getattr(fc, "name", "")
-                fc_id = getattr(fc, "id", "")
-                args = getattr(fc, "args", {})
-                log.info(f"Tool call: {func_name}({args})")
-
-                # Builtin tool 처리
-                if func_name in BUILTIN_TOOL_NAMES and self._call:
-                    if self._call:
-                        self._call.metrics.record_tool_call()
-                    result = await execute_builtin_tool(func_name, args, self._call)
-                    if result == "":  # hang_up
-                        return
-                    if result is not None:
-                        responses.append(
-                            types.FunctionResponse(
-                                id=fc_id,
-                                name=func_name,
-                                response={"result": result},
-                            )
-                        )
-                    continue
-
-                # Custom / MCP tool 처리
-                if self._call:
-                    self._call.metrics.record_tool_call()
-                source = "mcp" if func_name in self._tools._mcp_tools else "local"
-                with tool_call_span(func_name, source):
-                    try:
-                        result = await self._tools.call(func_name, args)
-                    except Exception as e:
-                        log.error(f"Tool call failed: {func_name}: {e}")
-                        if self._call:
-                            self._call.metrics.record_tool_error(e)
-                        result = f"Error: {e}"
-
-                responses.append(
-                    types.FunctionResponse(
-                        id=fc_id,
-                        name=func_name,
-                        response={"result": str(result)},
-                    )
-                )
+                try:
+                    resp = await self._execute_function_call(fc)
+                except GeminiRealtime._HangUp:
+                    return
+                if resp is not None:
+                    responses.append(resp)
         finally:
             if player:
                 await player.stop()
 
         if responses:
-            self._trace("tool_response", names=",".join(r.name or "" for r in responses))
+            self._trace("tool_response", names=",".join(r.name or "" for r in responses), mode="blocking")
             await self._session.send_tool_response(
                 function_responses=responses,
             )
@@ -625,16 +737,30 @@ class GeminiRealtime:
                     "parameters": params,
                 }
             )
-        declarations.extend(get_builtin_tool_schemas(self._builtin_tools, fmt="gemini"))
-        behavior = self.effective_tool_behavior()
-        if behavior:
-            for decl in declarations:
+        builtin_decls = get_builtin_tool_schemas(self._builtin_tools, fmt="gemini")
+
+        self._declared_behavior.clear()
+        self._declared_scheduling.clear()
+        for decl in declarations:
+            tool = self._tools._tools.get(decl["name"])  # MCP 도구는 여기 없다 → 세션 기본값
+            behavior = self._behavior_for(decl["name"], tool.behavior if tool else None, builtin=False)
+            if behavior:
                 decl["behavior"] = behavior
+            self._declared_behavior[decl["name"]] = behavior
+            self._declared_scheduling[decl["name"]] = tool.scheduling if tool else None
+        for decl in builtin_decls:
+            behavior = self._behavior_for(decl["name"], None, builtin=True)
+            if behavior:
+                decl["behavior"] = behavior
+            self._declared_behavior[decl["name"]] = behavior
+            self._declared_scheduling[decl["name"]] = None
+        declarations.extend(builtin_decls)
         return declarations
 
     async def stop(self) -> None:
         # cancel 후 gather 로 수거 — 안 하면 receive loop 의 예외가 retrieve 되지 않아
         # "Task exception was never retrieved" 경고가 발생한다 (특히 prewarm 창이 길 때).
+        self._cancel_inflight(list(self._inflight))
         current = asyncio.current_task()
         pending = [t for t in self._tasks if t is not current]
         for task in pending:

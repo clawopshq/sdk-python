@@ -223,8 +223,21 @@ class ClawOpsAgent:
             raise ValueError(f"{name}={gain!r} must be a finite number >= 0")
         return value
 
-    def tool(self, fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
-        return self._tool_registry.register(fn)
+    def tool(
+        self,
+        fn: Callable[..., Awaitable[str]] | None = None,
+        *,
+        behavior: str | None = None,
+        scheduling: str | None = None,
+    ) -> Any:
+        """도구 등록 데코레이터. ``@agent.tool`` 과 ``@agent.tool(behavior="NON_BLOCKING")`` 둘 다 된다.
+
+        - ``behavior``: Gemini Live 함수 선언의 behavior(``"BLOCKING"``·``"NON_BLOCKING"``). 생략하면
+          세션의 모델별 기본값. NON_BLOCKING 도구는 결과를 기다리지 않고 모델이 계속 대화하며, 결과는
+          도구가 끝나는 즉시 보낸다.
+        - ``scheduling``: NON_BLOCKING 결과를 모델이 다루는 방식(``"SILENT"``·``"WHEN_IDLE"``·``"INTERRUPT"``).
+        """
+        return self._tool_registry.register(fn, behavior=behavior, scheduling=scheduling)
 
     def on(self, event: str) -> Callable:
         def decorator(fn: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
