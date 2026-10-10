@@ -518,48 +518,77 @@ class GeminiRealtime:
                 await self._handle_tool_calls(self._pending_tool_call)
             self._pending_tool_call = None
 
+    async def _close_ctx(self, ctx: Any, *, timeout: float = 2.0) -> None:
+        """연결 하나를 조용히 닫는다. 서버가 세션을 놓아야 같은 핸들로 다시 붙을 수 있다."""
+        if ctx is None:
+            return
+        try:
+            await asyncio.wait_for(ctx.__aexit__(None, None, None), timeout=timeout)
+        except Exception as e:  # noqa: BLE001 — 죽은 연결 정리 실패는 치명적이지 않다
+            log.debug(f"Gemini connection close: {e}")
+
     async def _reconnect(self, reason: str) -> bool:
         """같은 대화를 새 연결로 이어 간다(session_resumption 핸들). 성공하면 True.
 
-        실패가 상한에 닿으면 통화에 ``session_lost`` 를 알리고 끊는다 — 모델만 사라진 채 통화가
-        무음으로 이어지는 것이 가장 나쁜 실패이기 때문이다.
+        순서: 옛 연결을 먼저 닫는다(서버가 세션을 놓게) → 핸들로 재접속(상한만큼, 백오프) → 그래도 안 되면
+        핸들 없이 새 세션으로 이어 간다(대화 기억은 잃지만 통화는 산다) → 그것마저 실패하면 통화에
+        ``session_lost`` 를 알리고 끊는다. 모델만 사라진 채 통화가 무음으로 이어지는 것이 가장 나쁜 실패다.
+
+        2026-10-10 실측: 15초 안에 setup 이 안 끝나 버린 연결이 서버엔 살아 있어 다음 시도가
+        1008 "session is already connected to an existing client" 로 거절됐다. 그래서 실패한 시도의
+        연결도 반드시 닫는다.
         """
         if self._stopping:
             return False
         if self._reconnect_lock.locked():
             return True  # 이미 다른 경로가 재접속 중
         async with self._reconnect_lock:
-            old_ctx, old_session = self._live_ctx, self._session
+            old_ctx = self._live_ctx
             self._session = None  # 그동안 feed_audio 는 조용히 버린다
+            self._live_ctx = None
             self._trace("reconnect", reason=reason, handle=bool(self._resumption_handle))
             log.info("Gemini Live reconnecting (%s, resume=%s)", reason, bool(self._resumption_handle))
-            last_error: Exception | None = None
-            for attempt in range(1, self._reconnect_max_attempts + 1):
+            await self._close_ctx(old_ctx)
+
+            async def _try_connect() -> Any | None:
                 try:
-                    new_session = await asyncio.wait_for(self._open_live_session(), timeout=15.0)
+                    return await asyncio.wait_for(self._open_live_session(), timeout=15.0)
                 except Exception as e:  # noqa: BLE001 — 재접속 실패 사유는 그대로 기록만 한다
-                    last_error = e
-                    log.warning(
-                        "Gemini Live reconnect attempt %d/%d failed: %s", attempt, self._reconnect_max_attempts, e
-                    )
-                    await asyncio.sleep(min(0.5 * (2 ** (attempt - 1)), 2.0))
-                    continue
-                self._session = new_session
-                self._pending_tool_call = None
-                self._audio_remainder = b""
-                if old_ctx is not None and old_session is not new_session:
-                    try:
-                        await asyncio.wait_for(old_ctx.__aexit__(None, None, None), timeout=2.0)
-                    except Exception as e:  # noqa: BLE001 — 옛 연결 정리 실패는 치명적이지 않다
-                        log.debug(f"Gemini old connection close: {e}")
-                self._trace("reconnected", attempt=attempt)
-                log.info("Gemini Live reconnected (attempt %d)", attempt)
-                return True
-            self._live_ctx = old_ctx  # 정리 대상으로 남긴다
-            await self._on_session_lost(
-                f"{reason}; reconnect failed after {self._reconnect_max_attempts} attempts: {last_error}"
-            )
+                    # 타임아웃·거절로 버린 시도의 연결도 닫는다 — 안 닫으면 서버가 세션을 붙잡아 다음 시도가 1008 로 거절된다.
+                    await self._close_ctx(self._live_ctx)
+                    self._live_ctx = None
+                    log.warning("Gemini Live reconnect attempt failed: %s", repr(e))
+                    return None
+
+            attempts = self._reconnect_max_attempts
+            for attempt in range(1, attempts + 1):
+                new_session = await _try_connect()
+                if new_session is not None:
+                    self._adopt_session(new_session)
+                    self._trace("reconnected", attempt=attempt, resumed=bool(self._resumption_handle))
+                    log.info("Gemini Live reconnected (attempt %d, resumed=%s)", attempt, bool(self._resumption_handle))
+                    return True
+                if attempt < attempts:
+                    await asyncio.sleep(min(1.0 * (2 ** (attempt - 1)), 4.0))
+
+            if self._resumption_handle and not self._stopping:
+                # 핸들 재접속을 포기하고 새 세션으로 이어 간다. system_prompt·도구는 config 에 있어 그대로다.
+                log.warning("Gemini Live resume failed; starting a fresh session without context")
+                self._resumption_handle = None
+                new_session = await _try_connect()
+                if new_session is not None:
+                    self._adopt_session(new_session)
+                    self._trace("reconnected", attempt=attempts + 1, resumed=False)
+                    log.info("Gemini Live reconnected without context (fresh session)")
+                    return True
+
+            await self._on_session_lost(f"{reason}; reconnect failed after {attempts} attempts (+fresh)")
             return False
+
+    def _adopt_session(self, new_session: Any) -> None:
+        self._session = new_session
+        self._pending_tool_call = None
+        self._audio_remainder = b""
 
     async def _on_session_lost(self, reason: str) -> None:
         """재접속을 포기했다. 통화 쪽에 알리고 끊는다(무음 방치 금지)."""

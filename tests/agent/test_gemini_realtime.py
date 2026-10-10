@@ -761,15 +761,66 @@ async def test_receive_loop_reconnects_when_connection_drops():
 @pytest.mark.asyncio
 async def test_reconnect_failure_emits_session_lost_and_hangs_up():
     session = _runtime_session(reconnect_max_attempts=1)
+    session._resumption_handle = "h-1"
     session._open_live_session = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
     session._call.hangup = AsyncMock()
 
     ok = await session._reconnect("test")
     assert ok is False
+    # 핸들 시도 1회 + 핸들 없는 새 세션 시도 1회
+    assert session._open_live_session.await_count == 2
     session._call._emit.assert_awaited()
     event, reason = session._call._emit.call_args.args
-    assert event == "session_lost" and "boom" in reason
+    assert event == "session_lost" and "reconnect failed" in reason
     session._call.hangup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_falls_back_to_fresh_session_when_resume_is_rejected():
+    """핸들 재접속이 1008(already connected)로 계속 거절되면 핸들 없이 새 세션으로 통화를 살린다."""
+    session = _runtime_session(reconnect_max_attempts=1)
+    session._resumption_handle = "h-1"
+    fresh = AsyncMock()
+    seen: list[str | None] = []
+
+    async def fake_open():
+        seen.append(session._resumption_handle)
+        if session._resumption_handle:
+            raise RuntimeError("1008 session is already connected to an existing client")
+        return fresh
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+    ok = await session._reconnect("test")
+    assert ok is True
+    assert seen == ["h-1", None]
+    assert session._session is fresh
+    session._call._emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_closes_connections_of_failed_attempts():
+    """타임아웃·거절로 버린 시도의 연결(self._live_ctx)도 닫는다 — 안 닫으면 서버가 세션을 붙잡는다."""
+    session = _runtime_session(reconnect_max_attempts=1)
+    old_ctx = AsyncMock()
+    session._live_ctx = old_ctx
+    abandoned = AsyncMock()
+    good = AsyncMock()
+    calls = {"n": 0}
+
+    async def fake_open():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            session._live_ctx = abandoned  # 연결은 열렸는데 setup 이 실패한 모양
+            raise RuntimeError("setup timeout")
+        session._live_ctx = AsyncMock()
+        return good
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+    session._resumption_handle = "h-1"
+    ok = await session._reconnect("test")
+    assert ok is True and session._session is good
+    old_ctx.__aexit__.assert_awaited_once()  # 옛 연결은 재접속 전에 닫는다
+    abandoned.__aexit__.assert_awaited_once()  # 실패한 시도의 연결도 닫는다
 
 
 @pytest.mark.asyncio
