@@ -780,3 +780,40 @@ async def test_go_away_ignored_while_stopping():
     await session._handle_response(_lifecycle_msg(go_away=SimpleNamespace(time_left="1s")))
     await _settle()
     session._open_live_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_control_messages_are_ignored():
+    """재접속으로 교체된 옛 연결의 go_away·핸들·tool_call 은 무시하고 전사는 흘린다."""
+    session = _runtime_session()
+    session._resumption_handle = "h-new"
+    session._open_live_session = AsyncMock()  # type: ignore[method-assign]
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def note(x: str) -> str:
+        """note"""
+        return "r"
+
+    session._build_tool_schemas()
+    msg = _lifecycle_msg(
+        server_content=SimpleNamespace(
+            model_turn=None,
+            turn_complete=False,
+            generation_complete=False,
+            interrupted=False,
+            input_transcription=None,
+            output_transcription=SimpleNamespace(text="늦은 전사"),
+        ),
+        session_resumption_update=SimpleNamespace(resumable=True, new_handle="h-old"),
+        go_away=SimpleNamespace(time_left="1s"),
+        tool_call=genai_types.LiveServerToolCall(
+            function_calls=[genai_types.FunctionCall(name="note", id="x", args={"x": "1"})]
+        ),
+    )
+    await session._handle_response(msg, stale=True)
+    await _settle()
+    session._call._emit.assert_awaited_with("transcript", "assistant", "늦은 전사")
+    assert session._resumption_handle == "h-new"
+    session._open_live_session.assert_not_called()
+    assert not session._inflight
+    await session.stop()

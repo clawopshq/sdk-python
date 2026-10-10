@@ -510,12 +510,13 @@ class GeminiRealtime:
                         response = await asyncio.wait_for(it.__anext__(), timeout=self._TOOL_DRAIN_TIMEOUT)
                     else:
                         response = await it.__anext__()
-                    await self._handle_response(response)
+                    # 재접속으로 교체된 옛 연결의 메시지는 오디오·전사만 흘리고 제어 메시지는 무시한다.
+                    await self._handle_response(response, stale=self._session is not session)
             except (StopAsyncIteration, asyncio.TimeoutError):
                 pass
-            if self._pending_tool_call:
+            if self._pending_tool_call and self._session is session:
                 await self._handle_tool_calls(self._pending_tool_call)
-                self._pending_tool_call = None
+            self._pending_tool_call = None
 
     async def _reconnect(self, reason: str) -> bool:
         """같은 대화를 새 연결로 이어 간다(session_resumption 핸들). 성공하면 True.
@@ -578,7 +579,13 @@ class GeminiRealtime:
         except Exception as e:  # noqa: BLE001
             log.error(f"hangup after session loss failed: {e}")
 
-    async def _handle_response(self, response: Any) -> None:
+    async def _handle_response(self, response: Any, *, stale: bool = False) -> None:
+        """서버 메시지 하나를 처리한다.
+
+        ``stale`` 은 재접속으로 교체된 옛 연결에서 온 메시지다. 남은 오디오·전사는 그대로 흘리되
+        go_away·session_resumption_update·tool_call 같은 제어 메시지는 무시한다 — 옛 연결의 늦은
+        go_away 가 재접속을 또 일으키거나 옛 핸들이 새 핸들을 덮으면 안 된다.
+        """
         if not self._call:
             return
 
@@ -628,6 +635,9 @@ class GeminiRealtime:
                 if text:
                     log.debug(f"[Transcript] assistant: {text}")
                     await self._call._emit("transcript", "assistant", text)
+
+        if stale:
+            return
 
         # ── 세션 수명 ──
         upd = getattr(response, "session_resumption_update", None)
