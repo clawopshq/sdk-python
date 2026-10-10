@@ -660,3 +660,211 @@ async def test_generation_complete_flushes_audio_remainder():
     (frame,) = session._call.send_audio.call_args.args
     assert len(frame) == 160 and frame.startswith(b"\x01" * 10)
     assert session._audio_remainder == b""
+
+
+# ── 세션 수명: session_resumption · go_away 재접속 · session_lost (0.62.0) ──────────
+
+
+def _lifecycle_msg(**fields):
+    base = {
+        "server_content": None,
+        "tool_call": None,
+        "tool_call_cancellation": None,
+        "session_resumption_update": None,
+        "go_away": None,
+    }
+    base.update(fields)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_connect_config_sends_session_resumption_by_default():
+    session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live", greeting=False)
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert captured["config"]["session_resumption"] == {"handle": None}
+    assert "context_window_compression" not in captured["config"]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_session_resumption_can_be_disabled_and_compression_passthrough():
+    compression = {"sliding_window": {}}
+    session = GeminiRealtime(
+        api_key="AIza-test",
+        model="gemini-3.8-live",
+        greeting=False,
+        session_resumption=False,
+        context_window_compression=compression,
+    )
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert "session_resumption" not in captured["config"]
+    assert captured["config"]["context_window_compression"] == compression
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_resumption_update_stores_handle_and_go_away_reconnects_with_it():
+    session = _runtime_session()
+    old_ctx = AsyncMock()
+    session._live_ctx = old_ctx
+    old_session = session._session
+    new_session = AsyncMock()
+    opened: list[str | None] = []
+
+    async def fake_open():
+        opened.append(session._resumption_handle)
+        return new_session
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+
+    await session._handle_response(
+        _lifecycle_msg(session_resumption_update=SimpleNamespace(resumable=True, new_handle="h-123"))
+    )
+    assert session._resumption_handle == "h-123"
+
+    await session._handle_response(_lifecycle_msg(go_away=SimpleNamespace(time_left="10s")))
+    await _settle(10)
+    assert opened == ["h-123"]  # 새 접속은 보관한 핸들로
+    assert session._session is new_session and session._session is not old_session
+    old_ctx.__aexit__.assert_awaited_once()
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_receive_loop_reconnects_when_connection_drops():
+    session = _runtime_session()
+
+    class FirstSession:
+        async def receive(self):
+            raise ConnectionError("1011 going away")
+            yield  # pragma: no cover
+
+    second = AsyncMock()
+
+    async def _second_receive():
+        session._stopping = True  # 한 번 돈 뒤 루프를 끝낸다
+        if False:
+            yield
+
+    second.receive = _second_receive
+    session._session = FirstSession()
+    session._open_live_session = AsyncMock(return_value=second)  # type: ignore[method-assign]
+
+    await session._receive_loop()
+    session._open_live_session.assert_awaited_once()
+    assert session._session is second
+    session._call.hangup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_failure_emits_session_lost_and_hangs_up():
+    session = _runtime_session(reconnect_max_attempts=1)
+    session._resumption_handle = "h-1"
+    session._open_live_session = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+    session._call.hangup = AsyncMock()
+
+    ok = await session._reconnect("test")
+    assert ok is False
+    # 핸들 시도 1회 + 핸들 없는 새 세션 시도 1회
+    assert session._open_live_session.await_count == 2
+    session._call._emit.assert_awaited()
+    event, reason = session._call._emit.call_args.args
+    assert event == "session_lost" and "reconnect failed" in reason
+    session._call.hangup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_falls_back_to_fresh_session_when_resume_is_rejected():
+    """핸들 재접속이 1008(already connected)로 계속 거절되면 핸들 없이 새 세션으로 통화를 살린다."""
+    session = _runtime_session(reconnect_max_attempts=1)
+    session._resumption_handle = "h-1"
+    fresh = AsyncMock()
+    seen: list[str | None] = []
+
+    async def fake_open():
+        seen.append(session._resumption_handle)
+        if session._resumption_handle:
+            raise RuntimeError("1008 session is already connected to an existing client")
+        return fresh
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+    ok = await session._reconnect("test")
+    assert ok is True
+    assert seen == ["h-1", None]
+    assert session._session is fresh
+    session._call._emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_closes_connections_of_failed_attempts():
+    """타임아웃·거절로 버린 시도의 연결(self._live_ctx)도 닫는다 — 안 닫으면 서버가 세션을 붙잡는다."""
+    session = _runtime_session(reconnect_max_attempts=1)
+    old_ctx = AsyncMock()
+    session._live_ctx = old_ctx
+    abandoned = AsyncMock()
+    good = AsyncMock()
+    calls = {"n": 0}
+
+    async def fake_open():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            session._live_ctx = abandoned  # 연결은 열렸는데 setup 이 실패한 모양
+            raise RuntimeError("setup timeout")
+        session._live_ctx = AsyncMock()
+        return good
+
+    session._open_live_session = fake_open  # type: ignore[method-assign]
+    session._resumption_handle = "h-1"
+    ok = await session._reconnect("test")
+    assert ok is True and session._session is good
+    old_ctx.__aexit__.assert_awaited_once()  # 옛 연결은 재접속 전에 닫는다
+    abandoned.__aexit__.assert_awaited_once()  # 실패한 시도의 연결도 닫는다
+
+
+@pytest.mark.asyncio
+async def test_go_away_ignored_while_stopping():
+    session = _runtime_session()
+    session._stopping = True
+    session._open_live_session = AsyncMock()  # type: ignore[method-assign]
+    await session._handle_response(_lifecycle_msg(go_away=SimpleNamespace(time_left="1s")))
+    await _settle()
+    session._open_live_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_control_messages_are_ignored():
+    """재접속으로 교체된 옛 연결의 go_away·핸들·tool_call 은 무시하고 전사는 흘린다."""
+    session = _runtime_session()
+    session._resumption_handle = "h-new"
+    session._open_live_session = AsyncMock()  # type: ignore[method-assign]
+
+    @session._tools.register(behavior="NON_BLOCKING")
+    async def note(x: str) -> str:
+        """note"""
+        return "r"
+
+    session._build_tool_schemas()
+    msg = _lifecycle_msg(
+        server_content=SimpleNamespace(
+            model_turn=None,
+            turn_complete=False,
+            generation_complete=False,
+            interrupted=False,
+            input_transcription=None,
+            output_transcription=SimpleNamespace(text="늦은 전사"),
+        ),
+        session_resumption_update=SimpleNamespace(resumable=True, new_handle="h-old"),
+        go_away=SimpleNamespace(time_left="1s"),
+        tool_call=genai_types.LiveServerToolCall(
+            function_calls=[genai_types.FunctionCall(name="note", id="x", args={"x": "1"})]
+        ),
+    )
+    await session._handle_response(msg, stale=True)
+    await _settle()
+    session._call._emit.assert_awaited_with("transcript", "assistant", "늦은 전사")
+    assert session._resumption_handle == "h-new"
+    session._open_live_session.assert_not_called()
+    assert not session._inflight
+    await session.stop()
