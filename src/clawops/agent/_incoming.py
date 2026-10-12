@@ -18,7 +18,7 @@ from typing import Any, Literal
 log = logging.getLogger("clawops.agent")
 
 RejectReason = Literal["rejected", "busy"]
-"""``"rejected"`` = SIP 603(기본), ``"busy"`` = SIP 486."""
+"""``"rejected"`` = SIP 403(기본), ``"busy"`` = SIP 486."""
 
 REJECT_REASONS: tuple[str, ...] = ("rejected", "busy")
 
@@ -85,7 +85,7 @@ class IncomingCall:
         """이 통화를 받지 않고 거절한다. ``await call.reject()`` 로 부른다.
 
         Args:
-            reason: ``"rejected"``(기본, SIP 603) 또는 ``"busy"``(SIP 486, 통화중).
+            reason: ``"rejected"``(기본, SIP 403) 또는 ``"busy"``(SIP 486, 통화중).
 
         두 번 불러도 첫 결정이 유지된다. 결정 시한(5초)이 지난 뒤에 부르면 이미 수락한
         통화라 아무 일도 하지 않고 경고만 남긴다.

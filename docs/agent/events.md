@@ -59,7 +59,7 @@ from clawops.agent import IncomingCall
 @agent.on_incoming
 async def screen(call: IncomingCall):
     if call.caller_id_restricted:      # 번호 표시제한 통화
-        await call.reject()            # 거절(SIP 603)
+        await call.reject()            # 거절(SIP 403)
     elif call.from_number in blocklist:
         await call.reject(reason="busy")  # 통화중으로 거절(SIP 486)
     # reject() 를 부르지 않고 끝나면 평소대로 받습니다.
@@ -78,7 +78,7 @@ async def screen(call: IncomingCall):
 | `from_number` | `str` | 발신 번호. 번호 표시제한 통화도 번호는 그대로 옵니다 |
 | `to_number` | `str` | 수신 번호(이 에이전트의 번호) |
 | `caller_id_restricted` | `bool` | 발신자가 번호 표시제한을 걸고 건 통화면 `True` |
-| `reject(reason="rejected")` | | 거절합니다. `reason` 은 `"rejected"`(기본, SIP 603) 또는 `"busy"`(SIP 486). 그 밖의 값은 `ValueError` |
+| `reject(reason="rejected")` | | 거절합니다. `reason` 은 `"rejected"`(기본, SIP 403) 또는 `"busy"`(SIP 486). 그 밖의 값은 `ValueError` |
 
 ### 결정 규칙
 

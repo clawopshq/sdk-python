@@ -13,7 +13,7 @@
   @agent.on_incoming
   async def screen(call: IncomingCall):
       if call.caller_id_restricted:   # 번호 표시제한 통화
-          await call.reject()         # SIP 603. reason="busy" 면 SIP 486
+          await call.reject()         # SIP 403. reason="busy" 면 SIP 486
   ```
 
   - `IncomingCall`: `call_id`·`from_number`·`to_number`·`caller_id_restricted`·`reject(reason="rejected")`.

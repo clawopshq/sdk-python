@@ -273,7 +273,7 @@ class ClawOpsAgent:
         @agent.on_incoming
         async def screen(call: IncomingCall):
             if call.caller_id_restricted:
-                await call.reject()            # SIP 603. reason="busy" 면 486
+                await call.reject()            # SIP 403. reason="busy" 면 486
         ```
 
         - 훅이 ``reject()`` 를 부르지 않고 끝나면 수락한다(훅이 없을 때와 같다).
