@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.63.0 (2026-10-11)
+
+### Added
+- **`@agent.on_incoming` — 수신 통화를 받기 전에 거절합니다(clawopshq/clawops#1251).** 훅이 `IncomingCall` 을
+  받아 `await call.reject()` 를 부르면 SDK 가 `call.accept` 대신 `call.reject` 로 답하고, 서버는 응답하기
+  전에 통화를 끝냅니다(요금 없음). 세션·미디어·`session_setup` 은 열리지 않습니다.
+
+  ```python
+  from clawops.agent import IncomingCall
+
+  @agent.on_incoming
+  async def screen(call: IncomingCall):
+      if call.caller_id_restricted:   # 번호 표시제한 통화
+          await call.reject()         # SIP 403. reason="busy" 면 SIP 486
+  ```
+
+  - `IncomingCall`: `call_id`·`from_number`·`to_number`·`caller_id_restricted`·`reject(reason="rejected")`.
+    `reason` 은 `"rejected"`·`"busy"` 만 받습니다(그 밖은 `ValueError`). `CallSession` 이 아닙니다.
+  - `reject()` 없이 끝나면 받습니다. 예외를 던지거나 5초 안에 결정하지 못하면 경고를 남기고 **받습니다**.
+    시한 뒤의 `reject()` 와 두 번째 `reject()` 는 무시됩니다.
+  - 훅을 등록하지 않으면 지금과 똑같이 즉시 받습니다. `agent.on_incoming(fn)` 직접 등록과 동기 함수도 됩니다.
+  - 훅은 control 연결의 수신 루프와 따로 돌아, 선별하는 동안 다른 통화의 이벤트를 막지 않습니다.
+
+> ⚠️ 거절은 서버가 `call.reject` 를 지원해야 동작합니다. 서버 배포 전에는 거절이 다른 경로로 넘어갈 수 있습니다.
+
 ## 0.62.0 (2026-10-10)
 
 ### Fixed

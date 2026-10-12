@@ -11,7 +11,8 @@ import math
 import os
 import signal
 import time
-from typing import Any, Awaitable, Callable, Literal, TypedDict
+import inspect
+from typing import Any, Awaitable, Callable, Literal, TypedDict, TypeVar, Union
 
 from .._exceptions import AgentError
 from ._builtin_tools import BuiltinTool, resolve_builtin_tools
@@ -25,6 +26,7 @@ from ._deploy_checks import (
     write_ready_marker,
 )
 from ._hold_audio import load_hold_audio
+from ._incoming import INCOMING_HOOK_DEADLINE_S, IncomingCall
 from ._audio import apply_ulaw_gain, ulaw_to_pcm16
 from .mcp._client import MCPClient
 from ._media_ws import MediaWebSocket
@@ -98,6 +100,18 @@ async def _first_of(*events: asyncio.Event, timeout: float) -> None:
                 await w
             except asyncio.CancelledError:
                 pass
+
+
+IncomingHook = Callable[[IncomingCall], Union[Awaitable[None], None]]
+_HookT = TypeVar("_HookT", bound=IncomingHook)
+
+
+def _log_late_hook_error(task: asyncio.Future[Any]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("on_incoming 훅이 결정 뒤에 예외를 던졌습니다: %s: %s", type(exc).__name__, exc)
 
 
 class ToolConfig(TypedDict, total=False):
@@ -182,6 +196,12 @@ class ClawOpsAgent:
 
         self._tool_registry = ToolRegistry()
         self._event_handlers: dict[str, list[Callable[..., Awaitable[None]]]] = {}
+        # 수신 통화 선별 훅(@agent.on_incoming). None 이면 오늘과 똑같이 즉시 수락한다.
+        self._incoming_hook: IncomingHook | None = None
+        # 훅 결정 시한(초). 테스트가 줄일 수 있게 인스턴스 값으로 둔다.
+        self._incoming_hook_deadline_s = INCOMING_HOOK_DEADLINE_S
+        # 선별 중인 통화. 그 사이 서버가 call.ended 를 보내면(발신자가 끊음) 여기서 표시한다.
+        self._screening: dict[str, bool] = {}
         self._active_sessions: dict[str, CallSession] = {}
         # 미디어 정리를 마친 통화가 서버 종료 프레임을 기다리는 자리. call_id → Event.
         self._terminal_waiters: dict[str, asyncio.Event] = {}
@@ -245,6 +265,28 @@ class ClawOpsAgent:
             return fn
 
         return decorator
+
+    def on_incoming(self, fn: _HookT) -> _HookT:
+        """수신 통화를 **받기 전에** 선별하는 훅을 등록한다. 데코레이터로도, 직접 호출로도 쓴다.
+
+        ```python
+        @agent.on_incoming
+        async def screen(call: IncomingCall):
+            if call.caller_id_restricted:
+                await call.reject()            # SIP 403. reason="busy" 면 486
+        ```
+
+        - 훅이 ``reject()`` 를 부르지 않고 끝나면 수락한다(훅이 없을 때와 같다).
+        - 5초 안에 결정하지 못하거나 예외를 던지면 경고를 남기고 **수락한다**(fail-open).
+        - 거절한 통화에는 세션·미디어·``session_setup`` 이 없고 ``call_start`` 등 이벤트도 없다.
+        - 동기 함수도 된다. 훅은 하나만 둔다 — 다시 등록하면 앞의 것을 바꾼다.
+        """
+        if not callable(fn):
+            raise TypeError("on_incoming 에는 호출 가능한 함수를 넘기세요")
+        if self._incoming_hook is not None:
+            log.warning("on_incoming 훅을 다시 등록했습니다 — 앞의 훅은 더 이상 불리지 않습니다")
+        self._incoming_hook = fn
+        return fn
 
     async def connect(self) -> None:
         """Control WS에 연결한다. 블로킹하지 않는다."""
@@ -779,6 +821,101 @@ class ClawOpsAgent:
         return call_session
 
     async def _handle_incoming(self, data: dict[str, Any]) -> None:
+        if self._incoming_hook is None:
+            await self._accept_incoming(data)
+            return
+        # 훅은 최대 5초를 쓴다. control WS 수신 루프는 이벤트를 하나씩 await 하므로 여기서
+        # 기다리면 그동안 다른 통화의 call.incoming·call.ended 가 멈춘다 — 따로 돌린다.
+        asyncio.create_task(self._screen_incoming(data))
+
+    async def _screen_incoming(self, data: dict[str, Any]) -> None:
+        call_id = data["callId"]
+        incoming = IncomingCall(
+            call_id=call_id,
+            from_number=data.get("from", ""),
+            to_number=self._from_number,
+            caller_id_restricted=data.get("callerIdRestricted") is True,
+        )
+        self._screening[call_id] = False
+        try:
+            reason = await self._run_incoming_hook(incoming)
+        finally:
+            ended = self._screening.pop(call_id, False)
+
+        if reason is not None:
+            log.info(f"Incoming call rejected by on_incoming: {call_id} (reason={reason})")
+            if self._control_ws:
+                await self._control_ws.send({"event": "call.reject", "callId": call_id, "reason": reason})
+            return
+        if ended:
+            # 선별하는 사이 발신자가 끊었다 — 수락할 통화가 없다.
+            log.info(f"Incoming call ended during on_incoming screening: {call_id}")
+            return
+        await self._accept_incoming(data)
+
+    async def _run_incoming_hook(self, incoming: IncomingCall) -> str | None:
+        """훅을 돌려 거절 사유를 돌려준다. 수락이면 None.
+
+        ``reject()`` 가 불리는 즉시 결정한다 — 훅이 그 뒤로 더 일하는 것을 기다리지 않는다.
+        시한 안에 결정이 없으면 수락하고, 훅은 끊지 않고 그대로 둔다(시한 뒤의 reject 는 경고).
+        """
+        hook = self._incoming_hook
+        assert hook is not None
+        decided = asyncio.Event()
+        incoming._on_decide = decided.set
+        task: asyncio.Future[Any] | None = None
+        logged = False
+        try:
+            try:
+                result = hook(incoming)
+                if inspect.isawaitable(result):
+                    task = asyncio.ensure_future(result)
+            except Exception as e:
+                log.warning(
+                    "on_incoming 훅이 예외를 던졌습니다 — 수락합니다: %s (%s: %s)",
+                    incoming.call_id,
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                return incoming.reject_reason
+
+            if task is not None and not decided.is_set():
+                waiter = asyncio.ensure_future(decided.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {task, waiter},
+                        timeout=self._incoming_hook_deadline_s,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    waiter.cancel()
+                if not done:
+                    log.warning(
+                        "on_incoming 훅이 %.1f초 안에 결정하지 않았습니다 — 수락합니다: %s",
+                        self._incoming_hook_deadline_s,
+                        incoming.call_id,
+                    )
+                elif task in done and not decided.is_set() and not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        logged = True
+                        log.warning(
+                            "on_incoming 훅이 예외를 던졌습니다 — 수락합니다: %s (%s: %s)",
+                            incoming.call_id,
+                            type(exc).__name__,
+                            exc,
+                            exc_info=exc,
+                        )
+            return incoming.reject_reason
+        finally:
+            incoming._closed = True
+            incoming._on_decide = None
+            if task is not None and not logged:
+                # 결정 뒤에도 훅은 끝까지 돈다 — 그 예외가 "never retrieved" 로 묻히지 않게 한다.
+                task.add_done_callback(_log_late_hook_error)
+
+    async def _accept_incoming(self, data: dict[str, Any]) -> None:
         call_id = data["callId"]
         from_number = data.get("from", "")
         media_url = data.get("mediaUrl", "")
@@ -1177,6 +1314,8 @@ class ClawOpsAgent:
         # 서버가 확정한 통화 시간. 구 서버는 이 값을 안 보내거나 0 을 보내므로 그대로 둔다 —
         # 없는 값을 로컬 계산으로 지어내면 어느 쪽인지 구분할 수 없게 된다.
         duration = data.get("duration")
+        if call_id in self._screening:
+            self._screening[call_id] = True
         call = self._active_sessions.get(call_id)
         log.info(f"Call ended (server): {call_id} (status={status})")
         if call:

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ._agent import ClawOpsAgent, ToolConfig
 from ._deploy_checks import clear_stale_ready_marker
+from ._incoming import IncomingCall
 from ._builtin_tools import BuiltinTool
 from ._media_ws import MediaWebSocket
 from ._session import CallSession, DtmfCollectorBusy
@@ -33,6 +34,7 @@ __all__ = [
     "BuiltinTool",
     "CallSession",
     "DtmfCollectorBusy",
+    "IncomingCall",
     "ClawOpsAgent",
     "MediaWebSocket",
     "ToolConfig",
