@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.64.0 (2026-10-13)
+
+### Added
+- **`Call` 에 전환(담당자 연결) 필드 타입(clawopshq/clawops#1215).** 서버는 이미 내려 주고 있었지만 모델에 필드가
+  없어 `extra="allow"` 로만 받던 값입니다.
+  - 요약(대표 시도 하나): `transfer_to` · `transfer_status` · `transfer_duration` · `transfer_hangup_cause_q850` ·
+    `transfer_sip_response_code` · `transfer_reason_text`. 목록·단건 조회 모두에 있습니다.
+  - 전체 시도: `transfers: list[TransferLeg]` — **`calls.get()` 단건 조회에만** 있습니다(목록에서는 `None`).
+  - `TransferLeg.answered_at`(대상이 받은 시각)과 `TransferLeg.timeout`(적용한 대기 한도, 초)이 새로 생겼습니다.
+    담당자가 받기까지 걸린 시간은 `answered_at - started_at` 입니다. `connected_at` 은 warm 전환에서 연결 전
+    안내가 끝난 뒤 시각이라 그만큼 늦습니다.
+
+  ```python
+  call = client.calls.get("CA...")
+  for leg in call.transfers or []:
+      if leg.answered_at and leg.started_at:
+          secs = (leg.answered_at - leg.started_at).total_seconds()
+          limit = f" (한도 {leg.timeout}초)" if leg.timeout is not None else ""
+          print(f"#{leg.sequence} {leg.status} — {secs:.1f}초 만에 받음{limit}")
+  ```
+
+  - **받았는지 판정은 `answered_at` 으로 합니다.** 값이 있으면 받은 것입니다 — 연결 전 안내 도중 끝난 warm
+    전환은 `status` 가 `failed` 지만 받은 전환입니다. `answered_at` · `timeout` 은 2026-10-13 부터 기록돼,
+    그 이전 전환(값이 `None`)만 `status` 로 판정하세요.
+  - `refer-attended` 는 기다리는 단계가 없어 `timeout` 이 항상 `None` 입니다.
+  - 요약 필드가 `None` 이어도 전환이 없었다는 뜻은 아닙니다. 대표 시도는 끝난 시도 중에서만 고르므로, 시도가
+    진행 중이거나 `interrupted` 로만 끝났으면 `None` 입니다. 전환 여부는 `transfers` 로 판정하세요.
+  - `transfer_reason_text` 는 대표 시도가 아니라 마지막으로 기록된 통신망 사유입니다. 시도별 사유는
+    `transfers[].reason_text` 를 쓰세요.
+  - `status` · `mode` 는 문자열입니다(`Literal` 이 아님). `TransferLeg` 의 필드는 전부 `Optional` 이라, 시도 하나의
+    모양이 어긋나도 통화 조회 전체가 실패하지 않습니다.
+  - 시도 하나의 값 타입이 예상과 달라도(소수 `duration` 등) 통화 조회 전체가 실패하지 않습니다. 그 시도는 검증
+    없이 받은 값 그대로 담깁니다.
+  - Node SDK 0.52.0 과 같은 필드입니다.
+
+### Changed
+- ⚠️ **이 필드들을 extra 로 읽던 코드는 고쳐야 합니다.** 0.63.0 까지는 모델에 없는 값이라 camelCase 이름과
+  dict 로 읽혔습니다. 이제는 snake_case 필드와 `TransferLeg` 객체입니다.
+
+  | 0.63.0 까지 | 0.64.0 부터 |
+  |---|---|
+  | `call.transferStatus` | `call.transfer_status` |
+  | `call.transfers[0]["answeredAt"]` | `call.transfers[0].answered_at` (`datetime`) |
+  | `call.model_dump()` 의 `transferStatus` 키 | `transfer_status` 키 (camelCase 는 `model_dump(by_alias=True)`) |
+
 ## 0.63.0 (2026-10-11)
 
 ### Added

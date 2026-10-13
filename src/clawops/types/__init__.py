@@ -4,7 +4,7 @@ from .blocked_recipient import (
     BlockedRecipientSource,
     BlockedRecipientStatus,
 )
-from .call import Call, CallControlResponse
+from .call import Call, CallControlResponse, TransferLeg
 from .call_params import CallContextParam, CallCreateParams, CallListParams, CallUpdateParams
 from .kakao import (
     KakaoChannel,
@@ -92,6 +92,7 @@ __all__ = [
     "SummaryStatus",
     "TextMessageCreateParams",
     "TextMessageType",
+    "TransferLeg",
     "TranscriptRequestAccepted",
     "TranscriptSegment",
     "TranscriptSpeaker",

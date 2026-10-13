@@ -1,9 +1,65 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, List, Literal, Optional
+
+from pydantic import ValidationError, field_validator
 
 from .._models import BaseModel
+
+
+class TransferLeg(BaseModel):
+    """전환(담당자 연결) 시도 한 건.
+
+    ``client.calls.get()`` 단건 조회의 ``transfers`` 에만 들어 있다(목록 조회에는 없다).
+    sequence 순으로 정렬돼 있다. 시도 하나의 모양이 어긋났다고 통화 조회 전체가 검증 오류로
+    실패하면 안 된다 — 필드는 전부 Optional 이고, 값의 타입이 어긋난 시도는 검증 없이 받은 값
+    그대로 담는다(``Call._lenient_transfers``).
+
+    담당자가 받기까지 걸린 시간은 ``answered_at - started_at`` 이다. ``connected_at`` 은 warm
+    전환에서 연결 전 안내가 끝난 뒤 시각이라 그만큼 늦다.
+
+    Attributes:
+        sequence: 이 통화에서 몇 번째 시도인지(1부터). 전환 웹훅의 ``TransferSequence`` 와 같은 값.
+        to: 전환 대상 번호 또는 SIP URI.
+        mode: blind / warm / refer / refer-attended.
+        destination_type: pstn / sip. 2026-07-10 이전 전환은 None.
+        status: initiated / ringing / connected / completed / failed / no-answer / busy /
+            canceled / interrupted. Literal 로 좁히지 않는다(hangup_cause 와 같은 이유).
+        duration: 연결→종료 초(관측값). 과금 초는 billable_duration. 연결되지 못했으면 None.
+        billable: 과금 대상 여부. 한 통화에서 최대 한 건만 True.
+        billable_duration: 과금 대상 초.
+        hangup_cause_q850: 이 시도의 통신망 Q.850 cause.
+        sip_response_code: 이 시도의 SIP 응답코드.
+        reason_text: 통신망 원본 진단 텍스트(자유 형식 — 분기 조건으로 쓰지 말 것).
+        started_at: 시도를 시작한 시각. 2026-07-10 이전 전환은 None.
+        answered_at: 대상이 전화를 받은 시각. 연결 전 안내 도중 끝나도 남는다.
+            받았는지 판정은 **값이 있으면 받은 것이다** — 안내 도중 끝난 warm 전환은 status 가
+            failed 지만 받은 전환이다. 2026-10-13 이전 전환은 받았어도 None 이라, 그 구간만
+            status 로 판정한다.
+        connected_at: 발신자와 대상이 연결된 시각(안내가 있으면 안내가 끝난 뒤). 연결되지
+            못했으면 None.
+        ended_at: 이 시도가 끝난 시각.
+        timeout: 이 시도에 적용한 대기 한도(초). 2026-10-13 이전 전환은 None.
+            refer-attended 는 이미 연결된 상담 통화로 넘겨 기다리는 단계가 없어 항상 None.
+    """
+
+    sequence: Optional[int] = None
+    to: Optional[str] = None
+    mode: Optional[str] = None
+    destination_type: Optional[str] = None
+    status: Optional[str] = None
+    duration: Optional[int] = None
+    billable: Optional[bool] = None
+    billable_duration: Optional[int] = None
+    hangup_cause_q850: Optional[int] = None
+    sip_response_code: Optional[int] = None
+    reason_text: Optional[str] = None
+    started_at: Optional[datetime] = None
+    answered_at: Optional[datetime] = None
+    connected_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    timeout: Optional[int] = None
 
 
 class Call(BaseModel):
@@ -52,6 +108,17 @@ class Call(BaseModel):
         hangup_source: 종료 책임 주체. carrier(통신망) / callee(수신자) /
             caller(발신자) / app·system(ClawOps 측 오류 — 수신자 번호를 정제
             대상에 넣지 말고 재시도할 것).
+        transfer_to / transfer_status / transfer_duration / transfer_hangup_cause_q850 /
+            transfer_sip_response_code: 전환(담당자 연결) 요약 — 이 통화의 **대표 시도**
+            하나에서 나온 값이다. 대표는 끝난 시도(completed / failed / busy / no-answer /
+            canceled) 중 completed 우선, 같으면 마지막 시도다. ⚠️ None 이 「전환이 없었다」를
+            뜻하지 않는다 — 시도가 진행 중이거나 interrupted 로만 끝났어도 None 이다. 전환 여부는
+            transfers 로 판정할 것. transfer_duration 은 연결→종료 관측값(과금 초 아님).
+        transfer_reason_text: 통신망 원본 진단 텍스트. ⚠️ 대표 시도가 아니라 **마지막으로 기록된**
+            통신망 사유라, 여러 번 시도한 통화에서는 다른 시도의 것일 수 있다. 시도별 사유는
+            transfers[].reason_text 를 쓴다.
+        transfers: 전환 시도 전체(sequence 순). **``calls.get()`` 단건 조회에만** 있고, 그 밖의
+            응답(목록·생성·수정)에서는 None.
     """
 
     call_id: str
@@ -79,9 +146,35 @@ class Call(BaseModel):
     hangup_cause_q850: Optional[int] = None
     sip_response_code: Optional[int] = None
     hangup_source: Optional[Literal["carrier", "callee", "caller", "app", "system"]] = None
+    transfer_to: Optional[str] = None
+    transfer_status: Optional[str] = None
+    transfer_duration: Optional[int] = None
+    transfer_hangup_cause_q850: Optional[int] = None
+    transfer_sip_response_code: Optional[int] = None
+    transfer_reason_text: Optional[str] = None
+    transfers: Optional[List[TransferLeg]] = None
     account_id: str
     date_created: datetime
     date_updated: Optional[datetime] = None
+
+    @field_validator("transfers", mode="before")
+    @classmethod
+    def _lenient_transfers(cls, v: Any) -> Any:
+        # 이 필드가 타입을 갖기 전(0.63.0 까지)에는 extra 로 그냥 받았다. 서버가 시도 하나에 예상과 다른
+        # 타입(소수 duration 등)을 보냈다고 통화 전체가 ValidationError 로 실패하면 회귀다 — 그 시도만
+        # 검증 없이 받은 값 그대로 담는다(별칭 매핑은 model_construct 도 적용한다).
+        if not isinstance(v, list):
+            return v
+        legs: List[Any] = []
+        for item in v:
+            if isinstance(item, dict):
+                try:
+                    legs.append(TransferLeg.model_validate(item))
+                except ValidationError:
+                    legs.append(TransferLeg.model_construct(**item))
+            else:
+                legs.append(item)
+        return legs
 
 
 class CallControlResponse(BaseModel):
