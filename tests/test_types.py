@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from clawops.types.call import Call, CallControlResponse
+from clawops.types.call import Call, CallControlResponse, TransferLeg
 from clawops.types.number import PhoneNumber, NumberListItem
 from clawops.types.shared import PaginationMeta
 
@@ -119,3 +119,114 @@ def test_pagination_meta():
     assert meta.total == 100
     assert meta.page == 2
     assert meta.page_size == 20
+
+
+# ── 전환(담당자 연결) 필드 — clawopshq/clawops#1215 ──────────────────────────
+# 서버 응답 모양: warm 전환이 안내 뒤에 연결된 시도 하나(값은 가짜).
+_TRANSFER_CALL = {
+    "callId": "CA00000000000000000000000000000001",
+    "status": "completed",
+    "to": "01000000000",
+    "from": "07012345678",
+    "direction": "outbound",
+    "duration": 62,
+    "accountId": "AC123",
+    "dateCreated": "2026-10-13T07:20:13Z",
+    "transferTo": "0212345678",
+    "transferStatus": "completed",
+    "transferDuration": 2,
+    "transferHangupCauseQ850": None,
+    "transferSipResponseCode": None,
+    "transferReasonText": None,
+    "transfers": [
+        {
+            "sequence": 1,
+            "to": "0212345678",
+            "mode": "warm",
+            "destinationType": "pstn",
+            "status": "completed",
+            "duration": 2,
+            "billable": True,
+            "billableDuration": 2,
+            "hangupCauseQ850": None,
+            "sipResponseCode": None,
+            "reasonText": None,
+            "startedAt": "2026-10-13T07:21:05.760Z",
+            "answeredAt": "2026-10-13T07:21:11.312Z",
+            "connectedAt": "2026-10-13T07:21:19.403Z",
+            "endedAt": "2026-10-13T07:21:20.989Z",
+            "timeout": 30,
+        }
+    ],
+}
+
+
+def test_call_transfer_summary_and_legs():
+    call = Call.model_validate(_TRANSFER_CALL)
+    assert call.transfer_status == "completed"
+    assert call.transfer_to == "0212345678"
+    assert call.transfers is not None
+    leg = call.transfers[0]
+    assert isinstance(leg, TransferLeg)
+    # 응답 시간 = answered_at - started_at (connected_at 은 안내 뒤라 늦다).
+    assert leg.answered_at is not None and leg.started_at is not None
+    assert leg.answered_at - leg.started_at == timedelta(milliseconds=5552)
+    assert leg.timeout == 30
+
+
+# 실제 서버는 이전 시도의 값도 키를 빼지 않고 None(null)으로 보낸다.
+def test_transfer_leg_before_answered_at_existed_is_none():
+    data = {
+        **_TRANSFER_CALL,
+        "transfers": [
+            {
+                "sequence": 1,
+                "to": "0212345678",
+                "mode": "blind",
+                "destinationType": "pstn",
+                "status": "no-answer",
+                "duration": None,
+                "billable": False,
+                "billableDuration": None,
+                "hangupCauseQ850": 19,
+                "sipResponseCode": 480,
+                "reasonText": None,
+                "startedAt": "2026-08-27T04:11:02.000Z",
+                "answeredAt": None,
+                "connectedAt": None,
+                "endedAt": "2026-08-27T04:11:32.000Z",
+                "timeout": None,
+            }
+        ],
+    }
+    leg = Call.model_validate(data).transfers[0]  # type: ignore[index]
+    assert leg.answered_at is None
+    assert leg.timeout is None
+    assert leg.sip_response_code == 480
+
+
+# 시도 하나의 모양이 어긋났다고 통화 전체 조회가 실패하면 안 된다.
+def test_transfer_leg_missing_fields_does_not_break_call():
+    call = Call.model_validate({**_TRANSFER_CALL, "transfers": [{"sequence": None, "status": "completed"}]})
+    assert call.transfers is not None
+    assert call.transfers[0].status == "completed"
+
+
+# 목록 조회는 transfers 를 싣지 않는다.
+def test_call_list_row_without_transfers():
+    data = {k: v for k, v in _TRANSFER_CALL.items() if k != "transfers"}
+    call = Call.model_validate({**data, "transferStatus": "no-answer", "transferDuration": None})
+    assert call.transfers is None
+    assert call.transfer_status == "no-answer"
+
+
+# 키가 빠진 게 아니라 **타입이 어긋난** 시도도 통화 전체를 실패시키지 않는다(0.63.0 까지는 extra 로 받았다).
+def test_transfer_leg_wrong_types_keep_raw_values():
+    call = Call.model_validate(
+        {**_TRANSFER_CALL, "transfers": [{"sequence": 1, "duration": 2.5, "billable": "yes", "status": "completed"}]}
+    )
+    assert call.status == "completed"
+    assert call.transfers is not None
+    leg = call.transfers[0]
+    assert leg.status == "completed"
+    assert leg.duration == 2.5  # 검증 없이 받은 값 그대로
