@@ -50,9 +50,20 @@ class IncomingCall:
         from_number: 발신 번호. 번호 표시제한 통화도 번호는 그대로 온다.
         to_number: 이 에이전트의 번호(수신 번호).
         caller_id_restricted: 발신자가 번호 표시제한을 걸고 건 통화면 ``True``.
+        forwarded_from: 착신전환으로 들어온 통화에서 발신자가 원래 건 번호. 착신전환을 실행한
+            통신사가 전환 정보를 함께 보내온 경우에만 값이 있고, 직접 걸려온 통화는 ``None``.
     """
 
-    __slots__ = ("_closed", "_on_decide", "_reason", "call_id", "caller_id_restricted", "from_number", "to_number")
+    __slots__ = (
+        "_closed",
+        "_on_decide",
+        "_reason",
+        "call_id",
+        "caller_id_restricted",
+        "forwarded_from",
+        "from_number",
+        "to_number",
+    )
 
     def __init__(
         self,
@@ -61,11 +72,13 @@ class IncomingCall:
         from_number: str,
         to_number: str,
         caller_id_restricted: bool = False,
+        forwarded_from: str | None = None,
     ) -> None:
         self.call_id = call_id
         self.from_number = from_number
         self.to_number = to_number
         self.caller_id_restricted = caller_id_restricted
+        self.forwarded_from = forwarded_from
         self._reason: str | None = None
         # 결정 시한이 지났다 — 이미 수락(또는 거절)을 보냈으므로 더는 바꿀 수 없다.
         self._closed = False
@@ -108,5 +121,6 @@ class IncomingCall:
     def __repr__(self) -> str:
         return (
             f"IncomingCall(call_id={self.call_id!r}, from_number={self.from_number!r}, "
-            f"to_number={self.to_number!r}, caller_id_restricted={self.caller_id_restricted!r})"
+            f"to_number={self.to_number!r}, caller_id_restricted={self.caller_id_restricted!r}, "
+            f"forwarded_from={self.forwarded_from!r})"
         )

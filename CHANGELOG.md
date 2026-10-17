@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.65.0 (2026-10-17)
+
+### Added
+- **수신 통화의 착신전환 원번호 `forwarded_from` (clawopshq/clawops#1423).** 착신전환으로 들어온 통화에서 발신자가
+  원래 건 번호입니다. `IncomingCall`(`@agent.on_incoming`, 받기 전)과 `CallSession`(받은 뒤) 양쪽에서 읽을 수 있습니다.
+  - 착신전환을 실행한 통신사가 전환 정보를 함께 보내온 경우에만 값이 있고, 직접 걸려온 통화와 발신 통화는 `None` 입니다.
+  - 서버가 이 값을 보내기 전 버전에서도 `None` 이라, 기존 코드는 영향을 받지 않습니다.
+
+  ```python
+  @agent.on("call_start")
+  async def on_start(call):
+      if call.forwarded_from:
+          print(f"착신전환 통화 — 원래 건 번호 {call.forwarded_from}")
+  ```
+
 ## 0.64.0 (2026-10-13)
 
 ### Added

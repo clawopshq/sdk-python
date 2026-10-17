@@ -36,6 +36,7 @@ class CallSession:
         account_id: str,
         direction: str = "inbound",
         caller_id_restricted: bool = False,
+        forwarded_from: str | None = None,
     ) -> None:
         self.call_id = call_id
         self.from_number = from_number
@@ -46,6 +47,9 @@ class CallSession:
         # from_number 에 그대로 있고 여부만 여기서 알 수 있다. 통신사가 표시제한 여부를 보내지
         # 않은 통화와 발신 통화는 False.
         self.caller_id_restricted = caller_id_restricted
+        # 착신전환으로 들어온 수신 통화에서 발신자가 원래 건 번호(clawops#1423). 착신전환을 실행한
+        # 통신사가 전환 정보를 함께 보내온 경우에만 값이 있고, 직접 걸려온 통화와 발신 통화는 None.
+        self.forwarded_from = forwarded_from
         self.status: str = "queued" if direction == "outbound" else "ringing"
         # 서버가 통보한 최종 종료 상태. 통화가 끝나기 전에는 None.
         # completed(성사) / no-answer / busy / rejected / canceled / failed.

@@ -106,6 +106,12 @@ IncomingHook = Callable[[IncomingCall], Union[Awaitable[None], None]]
 _HookT = TypeVar("_HookT", bound=IncomingHook)
 
 
+def _read_forwarded_from(data: dict[str, Any]) -> str | None:
+    """``call.incoming`` 의 착신전환 원번호. 직통 통화·옛 서버는 키가 없고, 빈 문자열도 「없음」이다."""
+    value = data.get("forwardedFrom")
+    return value if isinstance(value, str) and value else None
+
+
 def _log_late_hook_error(task: asyncio.Future[Any]) -> None:
     if task.cancelled():
         return
@@ -835,6 +841,7 @@ class ClawOpsAgent:
             from_number=data.get("from", ""),
             to_number=self._from_number,
             caller_id_restricted=data.get("callerIdRestricted") is True,
+            forwarded_from=_read_forwarded_from(data),
         )
         self._screening[call_id] = False
         try:
@@ -930,6 +937,8 @@ class ClawOpsAgent:
             direction="inbound",
             # 이 필드를 모르는 서버는 키를 보내지 않는다 — bool True 가 아니면 False.
             caller_id_restricted=data.get("callerIdRestricted") is True,
+            # 착신전환 원번호(clawops#1423). 직통 통화·옛 서버는 키가 없다 → None.
+            forwarded_from=_read_forwarded_from(data),
         )
 
         for event, handlers in self._event_handlers.items():
