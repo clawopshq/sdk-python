@@ -15,6 +15,7 @@ from .resources.numbers import AsyncNumbers, Numbers
 from .resources.recordings import AsyncRecordings, Recordings
 from .resources.assignment_links import AssignmentLinks, AsyncAssignmentLinks
 from .resources.blocked_recipients import AsyncBlockedRecipients, BlockedRecipients
+from .resources.sender_numbers import AsyncSenderNumbers, SenderNumbers
 from .resources.sip_credentials import AsyncSipCredentials, SipCredentials
 from .resources.sip_endpoints import AsyncSipEndpoints, SipEndpoints
 from .resources.webhook_logs import AsyncWebhookLogs, WebhookLogs
@@ -135,6 +136,11 @@ class ClawOps(SyncAPIClient):
         return BlockedRecipients(client=self, account_id=self._default_account_id)
 
     @property
+    def sender_numbers(self) -> SenderNumbers:
+        """문자 발신번호 리소스에 접근합니다(조회·등록·삭제)."""
+        return SenderNumbers(client=self, account_id=self._default_account_id)
+
+    @property
     def webhooks(self) -> Webhooks:
         """Webhook 서명 검증 유틸리티."""
         return Webhooks()
@@ -239,6 +245,11 @@ class AsyncClawOps(AsyncAPIClient):
     def blocked_recipients(self) -> AsyncBlockedRecipients:
         """수신거부(DNC) 명단 리소스에 접근합니다."""
         return AsyncBlockedRecipients(client=self, account_id=self._default_account_id)
+
+    @property
+    def sender_numbers(self) -> AsyncSenderNumbers:
+        """문자 발신번호 리소스에 접근합니다(조회·등록·삭제)."""
+        return AsyncSenderNumbers(client=self, account_id=self._default_account_id)
 
     @property
     def webhooks(self) -> Webhooks:

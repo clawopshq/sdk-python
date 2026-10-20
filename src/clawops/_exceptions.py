@@ -53,6 +53,16 @@ ClawOpsErrorCode = Union[
         "override_quota_exceeded",
         "no_active_subscription",
         "not_found",
+        # ── 문자 발신번호 (services/sender-numbers.ts, clawops#1489) ──
+        "sender_number_already_registered",
+        "sender_number_limit_reached",
+        "sender_number_limit_unknown",
+        "sender_number_holder_unresolved",
+        "sender_number_not_account_number",
+        "sender_number_not_registrable",
+        "sender_number_not_found",
+        "sender_number_not_deletable_via_api",
+        "api_key_sender_numbers_restricted",
         # ── 카카오 채널 연동 (services/kakao-channels.ts) ──
         "KAKAO_TOKEN_INVALID",
         "KAKAO_CHANNEL_ALREADY_LINKED",
