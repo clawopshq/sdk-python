@@ -15,6 +15,7 @@ from .kakao import (
 from .messages import AsyncMessages, Messages
 from .numbers import AsyncNumbers, Numbers
 from .recordings import AsyncRecordings, Recordings
+from .sender_numbers import AsyncSenderNumbers, SenderNumbers
 from .sip_credentials import AsyncSipCredentials, SipCredentials
 from .sip_endpoints import AsyncSipEndpoints, SipEndpoints
 
@@ -22,6 +23,7 @@ __all__ = [
     "AccountContext", "AsyncAccountContext",
     "AssignmentLinks", "AsyncAssignmentLinks",
     "AsyncBlockedRecipients", "BlockedRecipients",
+    "AsyncSenderNumbers", "SenderNumbers",
     "AsyncCalls", "AsyncMessages", "AsyncNumbers", "AsyncRecordings",
     "AsyncKakao", "AsyncKakaoChannels", "AsyncKakaoTemplates", "AsyncKakaoBrandTemplates",
     "AsyncSipCredentials", "AsyncSipEndpoints",

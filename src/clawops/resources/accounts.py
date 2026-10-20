@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from .assignment_links import AssignmentLinks, AsyncAssignmentLinks
 from .blocked_recipients import AsyncBlockedRecipients, BlockedRecipients
+from .sender_numbers import AsyncSenderNumbers, SenderNumbers
 from .calls import AsyncCalls, Calls
 from .kakao import AsyncKakao, Kakao
 from .messages import AsyncMessages, Messages
@@ -61,6 +62,10 @@ class AccountContext:
     def blocked_recipients(self) -> BlockedRecipients:
         return BlockedRecipients(client=self._client, account_id=self._account_id)
 
+    @property
+    def sender_numbers(self) -> SenderNumbers:
+        return SenderNumbers(client=self._client, account_id=self._account_id)
+
 
 class AsyncAccountContext:
     """비동기 계정 컨텍스트."""
@@ -100,3 +105,7 @@ class AsyncAccountContext:
     @property
     def blocked_recipients(self) -> AsyncBlockedRecipients:
         return AsyncBlockedRecipients(client=self._client, account_id=self._account_id)
+
+    @property
+    def sender_numbers(self) -> AsyncSenderNumbers:
+        return AsyncSenderNumbers(client=self._client, account_id=self._account_id)

@@ -34,9 +34,16 @@ from .message_params import (
     TextMessageCreateParams,
     TextMessageType,
 )
-from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
+from .number import NumberListItem, NumberUpdateResponse, PhoneNumber, ProvisionedPhoneNumber, RoutingType
 from .number_params import NumberCreateParams, NumberUpdateParams
 from .recording import RecordingDownload
+from .sender_number import (
+    SenderNumber,
+    SenderNumberGrace,
+    SenderNumberLimit,
+    SenderNumberList,
+    SmsSenderRegistration,
+)
 from .shared import PaginationMeta
 from .sip import SipCredential, SipEndpoint
 from .summary import SummaryStatus
@@ -85,6 +92,12 @@ __all__ = [
     "NumberUpdateResponse",
     "PaginationMeta",
     "PhoneNumber",
+    "ProvisionedPhoneNumber",
+    "SenderNumber",
+    "SenderNumberGrace",
+    "SenderNumberLimit",
+    "SenderNumberList",
+    "SmsSenderRegistration",
     "RecordingDownload",
     "RoutingType",
     "SipCredential",

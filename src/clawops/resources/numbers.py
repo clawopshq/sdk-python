@@ -4,7 +4,7 @@ from typing import Literal
 
 from .._resource import AsyncAPIResource, SyncAPIResource
 from .._utils import strip_not_given
-from ..types.number import NumberListItem, NumberUpdateResponse, PhoneNumber, RoutingType
+from ..types.number import NumberListItem, NumberUpdateResponse, ProvisionedPhoneNumber, RoutingType
 
 
 def _create_body(
@@ -64,13 +64,17 @@ class Numbers(SyncAPIResource):
                status_callback: str | None = None,
                status_callback_events: str | None = None,
                extra_headers: dict[str, str] | None = None,
-               extra_query: dict[str, object] | None = None, timeout: float | None = None) -> PhoneNumber:
+               extra_query: dict[str, object] | None = None, timeout: float | None = None) -> ProvisionedPhoneNumber:
         """PSTN 번호를 발급합니다.
 
         번호 풀에서 자동으로 번호를 발급합니다. 어떤 번호가 배정될지는 지정할 수 없습니다.
 
         발급 직후 번호는 routing_type='webhook' 이고 webhook_url 이 비어 있어, 그대로 두면
         걸려온 전화가 거절됩니다. 이어서 update() 로 착신 라우팅을 지정하세요.
+
+        회선 수 한도 안이면 문자 발신번호로도 자동 등록되며, 결과는 ``sms_sender`` 에 실립니다.
+        ``sms_sender.registered`` 가 False 여도 발급은 성공입니다 — 그 번호로 문자를 보내려면
+        ``reason`` 을 해결한 뒤 ``sender_numbers.create()`` 로 등록하세요.
 
         Args:
             webhook_url: 수신 전화 처리용 Webhook URL.
@@ -93,7 +97,7 @@ class Numbers(SyncAPIResource):
         body = _create_body(webhook_url, webhook_method, webhook_headers,
                             status_callback, status_callback_events)
         return self._client._post(
-            f"{self._base_path}/numbers", body=body if body else None, cast_to=PhoneNumber,
+            f"{self._base_path}/numbers", body=body if body else None, cast_to=ProvisionedPhoneNumber,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
 
@@ -211,12 +215,12 @@ class AsyncNumbers(AsyncAPIResource):
                      status_callback: str | None = None,
                      status_callback_events: str | None = None,
                      extra_headers: dict[str, str] | None = None,
-                     extra_query: dict[str, object] | None = None, timeout: float | None = None) -> PhoneNumber:
+                     extra_query: dict[str, object] | None = None, timeout: float | None = None) -> ProvisionedPhoneNumber:
         """번호를 비동기로 발급합니다."""
         body = _create_body(webhook_url, webhook_method, webhook_headers,
                             status_callback, status_callback_events)
         return await self._client._post(
-            f"{self._base_path}/numbers", body=body if body else None, cast_to=PhoneNumber,
+            f"{self._base_path}/numbers", body=body if body else None, cast_to=ProvisionedPhoneNumber,
             extra_headers=extra_headers, extra_query=extra_query, timeout=timeout,
         )
 

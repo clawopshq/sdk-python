@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from .._models import BaseModel
+from .sender_number import SmsSenderRegistration
 
 RoutingType = Literal["webhook", "sip", "softphone", "forward", "agent", "callflow"]
 """착신 라우팅 모드.
@@ -61,6 +62,17 @@ class PhoneNumber(BaseModel):
     dictionary_id: Optional[str] = None
     created_at: Optional[datetime] = None
 
+
+
+class ProvisionedPhoneNumber(PhoneNumber):
+    """번호 발급(``numbers.create()``) 응답 — 번호 + 문자 발신번호 자동 등록 결과(clawops#1489).
+
+    Attributes:
+        sms_sender: 회선 수 한도 안이면 자동 등록된 결과. ``registered`` 가 False 여도 발급은 성공입니다.
+            서버가 이 값을 보내기 전 버전에서는 None.
+    """
+
+    sms_sender: Optional[SmsSenderRegistration] = None
 
 NumberListItem = PhoneNumber
 NumberUpdateResponse = PhoneNumber

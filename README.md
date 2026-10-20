@@ -300,6 +300,9 @@ client.recordings.delete("CAabcdef1234567890")
 number = client.numbers.create()
 print(number.number, number.routing_type)  # 07012340001 webhook
 
+# 회선 수 한도 안이면 문자 발신번호로도 자동 등록된다
+print(number.sms_sender)  # registered=True sender_number_id='…'
+
 # 번호 목록 조회 (페이지네이션 없음 — 보유한 번호가 전부 반환된다)
 numbers = client.numbers.list()
 
@@ -343,6 +346,31 @@ client.numbers.delete("07012340001")
 라우팅을 바꾸면 다른 라우팅 필드는 서버에서 자동으로 비워집니다. `agent` 에서 `webhook` 으로
 되돌리면 `agent_id` 가 `None` 이 되므로, 다시 `agent` 로 돌아갈 때 `agent_id` 를 새로 지정해야
 합니다.
+
+### 문자 발신번호 (Sender Numbers)
+
+문자는 등록해 승인된 발신번호로만 보낼 수 있습니다. 승인되지 않은 번호를 `from_` 으로 보내면 `400 from_not_registered` 입니다.
+
+```python
+from clawops import ConflictError
+
+# 등록된 발신번호·유예 기간인 번호·회선 수 한도
+res = client.sender_numbers.list()
+print(res.sender_numbers, res.grace, res.limit)
+
+# ClawOps에서 개통한 070번호·대표번호 등록 — 즉시 승인
+try:
+    client.sender_numbers.create(number="07052358010")
+except ConflictError as e:
+    # 이미 등록된 번호면 이미 발송에 쓸 수 있는 상태다
+    if e.code != "sender_number_already_registered":
+        raise
+
+# 삭제 — API 로는 ClawOps에서 개통한 번호만
+client.sender_numbers.delete(res.sender_numbers[0].id)
+```
+
+발신번호 범위를 지정한 API 키는 조회만 됩니다(등록·삭제는 `403 api_key_sender_numbers_restricted`).
 
 ### 메시지 (Messages)
 
