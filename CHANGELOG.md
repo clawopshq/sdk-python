@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.66.0 (2026-10-20)
+
+### Added
+- **`GeminiRealtime(input_audio_transcription=...)`** — Live 세션의 `input_audio_transcription` 에 그대로 실립니다.
+  `language_codes`(BCP-47 언어 코드 목록)와 `custom_vocabulary`(우선 인식할 용어, 최대 1,000개)를 넣을 수 있습니다.
+  지정하지 않으면 지금처럼 빈 설정(`{}`)을 보냅니다.
+
+  ```python
+  session = GeminiRealtime(
+      model="gemini-3.8-live",
+      input_audio_transcription={
+          "language_codes": ["ko-KR"],
+          "custom_vocabulary": ["클로옵스", "ClawOps"],
+      },
+  )
+  ```
+
+### Changed
+- **`google-genai` 하한을 2.13.0 으로 올렸습니다**(`[gemini]` extra). `custom_vocabulary` 는 2.13.0 부터 받습니다.
+
 ## 0.65.0 (2026-10-17)
 
 ### Added

@@ -279,6 +279,37 @@ async def test_proactive_audio_absent_by_default():
 
 
 @pytest.mark.asyncio
+async def test_input_audio_transcription_passthrough():
+    """input_audio_transcription 은 해석하지 않고 그대로 실린다(language_codes·custom_vocabulary)."""
+    cfg = {"language_codes": ["ko-KR"], "custom_vocabulary": ["셔클", "아이오닉"]}
+    session = GeminiRealtime(api_key="AIza-test", input_audio_transcription=cfg, greeting=False)
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert captured["config"]["input_audio_transcription"] == cfg
+    assert captured["config"]["output_audio_transcription"] == {}
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_input_audio_transcription_default_empty():
+    """지정하지 않으면 지금처럼 빈 설정으로 전사만 켠다."""
+    session = GeminiRealtime(api_key="AIza-test", greeting=False)
+    captured, _ = _capture_connect(session)
+    await session.start(MagicMock())
+    assert captured["config"]["input_audio_transcription"] == {}
+    await session.stop()
+
+
+def test_input_audio_transcription_validates_with_google_genai():
+    """설치된 google-genai 가 두 필드를 받는다(하한 2.13.0 미만이면 pydantic extra=forbid 로 실패)."""
+    from google.genai import types
+
+    types.LiveConnectConfig(
+        input_audio_transcription={"language_codes": ["ko-KR"], "custom_vocabulary": ["셔클"]},
+    )
+
+
+@pytest.mark.asyncio
 async def test_tool_behavior_reaches_connect_config():
     session = GeminiRealtime(api_key="AIza-test", model="gemini-3.8-live", greeting=False)
     captured, _ = _capture_connect(session)

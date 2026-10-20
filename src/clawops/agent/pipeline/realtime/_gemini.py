@@ -175,6 +175,7 @@ class GeminiRealtime:
         tool_registry: ToolRegistry | None = None,
         recorder: AudioRecorder | None = None,
         realtime_input_config: dict[str, Any] | None = None,
+        input_audio_transcription: dict[str, Any] | None = None,
         thinking_config: dict[str, Any] | None = None,
         proactive_audio: bool | None = None,
         tool_behavior: str | None = None,
@@ -200,6 +201,7 @@ class GeminiRealtime:
         self._builtin_tools: set[BuiltinTool] | None = None
         self._recorder = recorder
         self._realtime_input_config = realtime_input_config
+        self._input_audio_transcription = input_audio_transcription
         self._thinking_config = thinking_config
         self._proactive_audio = proactive_audio
         if tool_behavior is not None and tool_behavior not in TOOL_BEHAVIORS:
@@ -293,7 +295,9 @@ class GeminiRealtime:
                     "prebuilt_voice_config": {"voice_name": self._voice},
                 },
             },
-            "input_audio_transcription": {},
+            # 전사는 끌 수 없다(대화 기록·이벤트가 쓴다). 값을 주면 해석하지 않고 그대로 넘긴다 —
+            # language_codes·custom_vocabulary(최대 1,000개)는 google-genai 2.13.0+ 에서 받는다.
+            "input_audio_transcription": dict(self._input_audio_transcription or {}),
             "output_audio_transcription": {},
         }
 
