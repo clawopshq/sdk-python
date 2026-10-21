@@ -348,6 +348,86 @@ async def test_user_interim_reaches_transcript_delta_hook_but_final_does_not() -
     await lk.stop()
 
 
+async def test_repeated_user_interim_is_sent_once() -> None:
+    """realtime 은 같은 중간 전사를 연달아 낸다 — 바로 앞과 같으면 한 번만 보낸다. 확정 뒤엔 다시 받는다."""
+    from livekit.agents.voice.events import UserInputTranscribedEvent
+
+    call = _make_call()
+    got: list[str] = []
+
+    async def on_delta(c: object, role: str, text: str) -> None:
+        got.append(text)
+
+    call._event_handlers = {"transcript_delta": [on_delta]}
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    for text, final in (("네", False), ("네", False), ("네", True), ("네", False)):
+        lk._session.emit(  # type: ignore[union-attr]
+            "user_input_transcribed", UserInputTranscribedEvent(transcript=text, is_final=final)
+        )
+    await asyncio.sleep(0.05)
+
+    assert got == ["네", "네"]
+    await lk.stop()
+
+
+async def test_hook_events_keep_emit_order_with_slow_handler() -> None:
+    """핸들러가 await 해도 이벤트는 발생 순서대로 처리된다 — 늦게 끝난 옛 누적이 확정을 덮지 않는다."""
+    from livekit.agents.llm import ChatMessage
+
+    call = _make_call()
+    got: list[tuple[str, str]] = []
+
+    async def slow_delta(c: object, role: str, text: str) -> None:
+        # 앞 조각일수록 오래 걸리게 해, 순서 보장이 없으면 뒤집히도록 만든다.
+        await asyncio.sleep(0.05 if text == "안녕" else 0)
+        got.append(("delta", text))
+
+    async def on_tx(c: object, role: str, text: str) -> None:
+        got.append(("final", text))
+
+    call._event_handlers = {"transcript_delta": [slow_delta], "transcript": [on_tx]}
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    delta = lk._session.output.transcription.next_in_chain  # type: ignore[union-attr]
+    await delta.capture_text("안녕")
+    await delta.capture_text("하세요")
+    lk._session.emit(  # type: ignore[union-attr]
+        "conversation_item_added",
+        type("E", (), {"item": ChatMessage(role="assistant", content=["안녕하세요"])})(),
+    )
+    await asyncio.sleep(0.2)
+
+    assert got == [("delta", "안녕"), ("delta", "안녕하세요"), ("final", "안녕하세요")]
+    await lk.stop()
+
+
+async def test_failing_handler_does_not_block_later_events() -> None:
+    """앞 핸들러가 예외로 죽어도 다음 이벤트는 전달된다(순서 사슬이 끊기지 않는다)."""
+    call = _make_call()
+    got: list[str] = []
+
+    async def flaky(c: object, role: str, text: str) -> None:
+        if text == "boom":
+            raise RuntimeError("handler failed")
+        got.append(text)
+
+    call._event_handlers = {"transcript_delta": [flaky]}
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    delta = lk._session.output.transcription.next_in_chain  # type: ignore[union-attr]
+    await delta.capture_text("boom")
+    delta.flush()
+    await delta.capture_text("다음")
+    await asyncio.sleep(0.05)
+
+    assert got == ["다음"]
+    await lk.stop()
+
+
 # ── 내장 도구 on/off ────────────────────────────────────────────
 
 

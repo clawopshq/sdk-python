@@ -84,6 +84,8 @@ class LiveKitSession:
         # transcript emit 은 LiveKit 의 동기 이벤트 콜백에서 fire-and-forget 로 돈다.
         # GC 로 태스크가 사라지지 않게 참조를 잡아둔다.
         self._emit_tasks: set[asyncio.Task[None]] = set()
+        # 마지막으로 띄운 emit 태스크 — 다음 emit 은 이게 끝난 뒤에 핸들러를 부른다(_forward_event).
+        self._emit_tail: asyncio.Task[None] | None = None
 
     # ── ClawOpsAgent 가 duck-typing 으로 부르는 setter ──────────
 
@@ -280,15 +282,21 @@ class LiveKitSession:
 
         session.on("conversation_item_added", _on_item)
 
+        last_user_text = ""
+
         def _on_user_transcribed(ev: Any) -> None:
             # 발신자 중간 전사 → `transcript_delta`. 확정(is_final)은 위 대화 항목이 `transcript`
             # 로 내보내므로 여기서는 건너뛴다. LiveKit 의 중간 전사는 그 발화의 누적 문장이라
             # 앞부분이 고쳐 쓰일 수 있다 — 그대로 넘긴다.
+            # realtime 은 같은 중간 전사를 연달아 두 번 내기도 한다(실측) — 바로 앞과 같으면 건너뛴다.
+            nonlocal last_user_text
             if getattr(ev, "is_final", True):
+                last_user_text = ""
                 return
             text = getattr(ev, "transcript", "") or ""
-            if not text.strip():
+            if not text.strip() or text == last_user_text:
                 return
+            last_user_text = text
             self._forward_event("transcript_delta", "user", text)
 
         session.on("user_input_transcribed", _on_user_transcribed)
@@ -299,12 +307,26 @@ class LiveKitSession:
     def _forward_event(self, event: str, *args: Any) -> None:
         # 동기 콜백에서 async _emit 을 태워야 하므로 태스크로 띄운다. prewarm 중이면
         # _target 이 _BufferingCall 이라 _emit 이 드롭 카운트로 흡수한다 (무해).
+        #
+        # ⚠️ 태스크는 **앞 태스크가 끝난 뒤** 핸들러를 부른다. 따로 띄우기만 하면 핸들러가 await 하는
+        # 동안 뒤 이벤트가 먼저 처리돼, 더 짧은 옛 누적이나 확정 뒤의 transcript_delta 가 앱에 늦게
+        # 닿는다 — 「받을 때마다 바꿔 끼운다」는 transcript_delta 계약이 깨진다.
         target = self._target
         if target is None:
             return
-        task = asyncio.create_task(target._emit(event, *args))
+        task = asyncio.create_task(self._emit_after(self._emit_tail, target, event, args))
+        self._emit_tail = task
         self._emit_tasks.add(task)
         task.add_done_callback(self._emit_tasks.discard)
+
+    @staticmethod
+    async def _emit_after(
+        prev: asyncio.Task[None] | None, target: Any, event: str, args: Tuple[Any, ...]
+    ) -> None:
+        if prev is not None and not prev.done():
+            # wait 는 앞 태스크의 예외·취소를 다시 던지지 않는다 — 앞 핸들러가 죽어도 뒤는 간다.
+            await asyncio.wait([prev])
+        await target._emit(event, *args)
 
 
 class _TranscriptDeltaOutput(TextOutput):
