@@ -33,6 +33,7 @@ async def on_failed(call, reason):
 | `call_end` | `(call)` | 통화 종료 — `call_start` 가 발화된 통화만 |
 | `call_failed` | `(call, reason)` | 통화가 **연결되지 못하고** 종료됨. `reason` 은 종료 사유 |
 | `transcript` | `(call, role, text)` | 음성 텍스트 생성 |
+| `transcript_delta` | `(call, role, text)` | 말하는 도중의 텍스트. `text` 는 그 발화의 지금까지 누적 문장입니다. `LiveKitSession` 만 보냅니다 |
 | `dtmf` | `(call, digit)` | DTMF 키 입력 수신 |
 
 `call_start`/`call_end` 는 통화가 **응답된 뒤** 열리는 미디어 세션에 묶여 있습니다. 상대가 받지 않았거나

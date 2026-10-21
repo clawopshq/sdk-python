@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.69.0 (2026-10-21)
+
+### Added
+- **`transcript_delta` 이벤트 — 말하는 도중의 텍스트 (`LiveKitSession`).** `@agent.on("transcript_delta")` 로
+  `(call, role, text)` 를 받습니다. `text` 는 그 발화의 **지금까지 누적 문장**이라 받을 때마다 통째로 바꿔 표시하면 됩니다.
+  - `role="assistant"`: 오디오 재생 속도에 맞춘 에이전트 텍스트입니다. 종전에는 `TranscriptSynchronizer` 가 만들고 버리던 값입니다.
+  - `role="user"`: 발신자 중간 전사(`user_input_transcribed`, `is_final=False`)입니다. 앞부분이 고쳐 쓰일 수 있습니다.
+  - 발화가 끝나면 지금처럼 `transcript` 가 확정 텍스트를 보냅니다. 끊긴 발화는 확정이 마지막 `transcript_delta` 보다 짧을 수 있습니다.
+
 ## 0.67.0 (2026-10-20)
 
 ### Added
