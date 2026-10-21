@@ -23,6 +23,7 @@ from livekit.agents.voice.transcription import TranscriptSynchronizer
 
 from .._session import CallSession
 from .._tool import ToolRegistry
+from ..media import MediaProfile
 from ..pipeline._buffering_call import _BufferingCall, drain_into
 from ._io import ClawOpsAudioInput, ClawOpsAudioOutput
 from ._toolset import ClawOpsPhoneTools
@@ -57,7 +58,11 @@ class LiveKitSession:
     직접 넘기면 통화 간에 그 객체를 공유하므로 동시통화 1건까지다.
     """
 
-    def __init__(self, create: CreateFn, *, audio_pause: bool = False) -> None:
+    def __init__(
+        self, create: CreateFn, *, audio_pause: bool = False,
+        media_profile: MediaProfile = MediaProfile.MULAW_8000,
+    ) -> None:
+        self._media_profile = MediaProfile(media_profile)
         self._create = create
         # 오디오 출력의 일시정지 능력(`_io.py` 모듈 docstring 「일시정지」). 켜면 LiveKit 이
         # 오탐 끼어들기(잡음·기침)로 멈춘 안내를 `false_interruption_timeout` 뒤 되살린다.
@@ -136,7 +141,7 @@ class LiveKitSession:
 
     async def feed_audio(self, audio: bytes, timestamp: int) -> None:
         if self._input is not None:
-            self._input.push_ulaw(audio)
+            self._input.push_audio(audio)
 
     async def feed_dtmf(self, digits: str) -> None:
         if self._session is None:
@@ -186,8 +191,8 @@ class LiveKitSession:
         session, agent = await self._create(call)
         _validate(session, agent)
 
-        self._input = ClawOpsAudioInput()
-        self._output = ClawOpsAudioOutput(target, pause=self._audio_pause)
+        self._input = ClawOpsAudioInput(media_profile=self._media_profile)
+        self._output = ClawOpsAudioOutput(target, pause=self._audio_pause, media_profile=self._media_profile)
 
         # ⚠️ TranscriptSynchronizer 는 필수다. room 없이는 이걸 안 씌우면
         # barge-in 시 synchronized_transcript 가 None 이라 LLM 컨텍스트에
