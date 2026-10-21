@@ -63,3 +63,35 @@ ClawOps 는 room 없는 transport 라, LiveKit 기능 중 room/서버에 묶인 
   세션을 새로 만들어 격리합니다. `session=LiveKitSession(create)` 는 통화 사이에 같은
   객체를 공유하므로 동시통화 1건까지입니다. 팩토리 모드에서는 HTTP 플러그인용
   `http_context` 도 통화별로 열립니다.
+
+## 명시적 미디어 프로필 (서버 연동용)
+
+기존 연결은 계속 G.711 μ-law 8kHz mono입니다. SDK는 서버가 지원을 확인한 내부
+managed 연결을 위해 `MediaProfile.PCM_S16LE_16000`도 처리합니다. 이 SDK 변경만으로
+운영 전화나 `ClawOpsAgent`의 미디어 형식이 바뀌지는 않습니다. 서버 지원 없이
+16kHz를 선택하면 안 됩니다. 일반 `ClawOpsAgent`, pipeline, realtime 세션은 기존
+8kHz 경로를 유지합니다.
+
+```python
+from clawops.agent.media import MediaProfile
+from clawops.agent.livekit import LiveKitSession
+from clawops.agent import MediaWebSocket
+
+profile = MediaProfile.PCM_S16LE_16000
+session = LiveKitSession(create, media_profile=profile)
+# MediaWebSocket(..., expected_media_profile=profile)
+```
+
+프로필은 **prewarm 전에** 정하고 같은 값을 `LiveKitSession`과 `MediaWebSocket`의
+`expected_media_profile`에 전달해야 합니다. PCM 프로필의 WS 바이트는 signed
+16-bit **little-endian**, 16,000Hz, mono이며 20ms는 640바이트입니다. RTP L16의
+network byte order와 다릅니다. `start.mediaFormat`의 encoding은
+`audio/pcm;encoding=signed-integer;bits=16;endianness=little`, sampleRate는 16000,
+channels는 1이어야 합니다. 기본 프로필은 encoding `audio/x-mulaw`, 8000Hz,
+20ms 160바이트입니다.
+
+`expected_media_profile`을 지정하면 서버의 `start` 형식 확인 전에는 큐의 오디오를
+전송하지 않습니다. 불일치하면 연결을 닫아, 이미 prewarm한 PCM을 구 서버에서
+μ-law로 재생하는 일을 막습니다. 프로필을 바꾸려면 세션을 새로 만드세요. 재생 시간,
+pause/resume 되감기, mark 완료와 tail padding도 프로필의 바이트율을 사용합니다.
+SDK 릴리스 후 runner와 call-engine이 이 계약을 함께 구현·검증한 뒤 활성화해야 합니다.

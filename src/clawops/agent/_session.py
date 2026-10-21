@@ -118,11 +118,11 @@ class CallSession:
         return (datetime.now() - self.start_time).total_seconds()
 
     async def send_audio(self, audio: bytes) -> None:
-        """G.711 μ-law 오디오(8kHz, mono)를 상대방에게 보낸다.
+        """선택된 transport 형식의 오디오를 상대방에게 보낸다.
 
-        PCM16 이 아니다. 전송 계층이 μ-law gain 을 적용한 뒤 바이트를 그대로
-        흘려보내므로, PCM16 을 넣으면 μ-law 로 재해석되어 잡음이 재생된다.
-        직접 오디오를 만들어 넣을 때는 먼저 변환할 것.
+        기본 ClawOpsAgent 연결은 G.711 μ-law(8kHz, mono)이다. 여기에 PCM16을
+        보내면 잡음이 된다. 서버와 명시적으로 PCM 프로필을 검증한 내부 연결에서만
+        해당 PCM 바이트를 보낼 수 있다. 이 메서드는 변환이나 형식 협상을 하지 않는다.
         """
         if self._send_audio_fn:
             await self._send_audio_fn(audio)

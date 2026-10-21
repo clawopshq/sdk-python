@@ -10,10 +10,12 @@ import base64
 import json
 import logging
 import time
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import aiohttp
+
+from .media import MediaProfile
 
 log = logging.getLogger("clawops.agent")
 
@@ -105,7 +107,14 @@ class MediaWebSocket:
         on_start: Callable[[dict[str, Any]], Awaitable[None]],
         on_stop: Callable[[], Awaitable[None]],
         on_dtmf: Callable[[str], Awaitable[None]] | None = None,
+        expected_media_profile: MediaProfile | None = None,
     ) -> None:
+        self._expected_media_profile = (
+            MediaProfile(expected_media_profile) if expected_media_profile is not None else None
+        )
+        self._format_validated = asyncio.Event()
+        if self._expected_media_profile is None:
+            self._format_validated.set()
         self._url = url
         self._on_audio = on_audio
         self._on_start = on_start
@@ -118,6 +127,8 @@ class MediaWebSocket:
         self._mark_waiters: dict[str, asyncio.Event] = {}
 
     async def connect(self) -> None:
+        if self._expected_media_profile is not None:
+            self._format_validated.clear()
         _warn_if_plaintext(self._url)
         self._session = aiohttp.ClientSession()
         self._ws = await self._session.ws_connect(
@@ -134,8 +145,19 @@ class MediaWebSocket:
                     event = data.get("event")
 
                     if event == "start":
-                        await self._on_start(parse_start_event(data))
+                        info = parse_start_event(data)
+                        if self._expected_media_profile is not None:
+                            fmt = data["start"].get("mediaFormat", {})
+                            self._expected_media_profile.validate_start({
+                                **info,
+                                "encoding": fmt.get("encoding", "audio/x-mulaw"),
+                                "channels": fmt.get("channels", 1),
+                            })
+                            self._format_validated.set()
+                        await self._on_start(info)
                     elif event == "media":
+                        if not self._format_validated.is_set():
+                            raise ValueError("Received media before format validation")
                         parsed = parse_media_event(data)
                         await self._on_audio(parsed["audio"], parsed["timestamp"])
                     elif event == "dtmf":
@@ -209,6 +231,7 @@ class MediaWebSocket:
     async def _send_loop(self) -> None:
         """오디오 청크를 플랫폼으로 전송 (pacing은 플랫폼이 처리)."""
         try:
+            await self._format_validated.wait()
             while True:
                 chunk = await self._audio_queue.get()
                 if chunk is None:

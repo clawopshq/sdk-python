@@ -28,10 +28,14 @@ from livekit.agents.voice.transcription import TranscriptSynchronizer  # noqa: E
 
 from clawops.agent._session import CallSession  # noqa: E402
 from clawops.agent.livekit._io import (  # noqa: E402
-    FRAME_BYTES,
-    SAMPLE_RATE,
     ClawOpsAudioOutput,
 )
+from clawops.agent.media import MediaProfile  # noqa: E402
+
+
+@pytest.fixture(params=list(MediaProfile), ids=lambda p: p.value)
+def profile(request):
+    return request.param
 
 
 class _EngineWs:
@@ -83,10 +87,10 @@ def _make_call(ws: _EngineWs) -> CallSession:
     return call
 
 
-def _pcm_frame(samples: int) -> rtc.AudioFrame:
+def _pcm_frame(samples: int, profile: MediaProfile) -> rtc.AudioFrame:
     return rtc.AudioFrame(
         data=b"\x00\x00" * samples,
-        sample_rate=SAMPLE_RATE,
+        sample_rate=profile.sample_rate,
         num_channels=1,
         samples_per_channel=samples,
     )
@@ -109,20 +113,20 @@ async def _wait_for(predicate, *, timeout: float = 2.0) -> bool:
 # ── 1. 능력 플래그 ──────────────────────────────────────────────
 
 
-async def test_can_pause_only_when_enabled() -> None:
+async def test_can_pause_only_when_enabled(profile) -> None:
     ws = _EngineWs()
-    assert ClawOpsAudioOutput(_make_call(ws)).can_pause is False
-    out = ClawOpsAudioOutput(_make_call(ws), pause=True)
+    assert ClawOpsAudioOutput(_make_call(ws), media_profile=profile).can_pause is False
+    out = ClawOpsAudioOutput(_make_call(ws), pause=True, media_profile=profile)
     assert out.can_pause is True
     # TranscriptSynchronizer 로 감싸도 능력이 체인을 타고 올라온다(LiveKit 이 보는 건 이쪽).
     sync = TranscriptSynchronizer(next_in_chain_audio=out, next_in_chain_text=None)
     assert sync.audio_output.can_pause is True
 
 
-async def test_pause_resume_noop_when_disabled_or_not_paused() -> None:
+async def test_pause_resume_noop_when_disabled_or_not_paused(profile) -> None:
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
     out.resume()  # pause 없이 resume — 아무 일도 없어야 한다
     await asyncio.sleep(0.01)
     assert _sent(call) == []
@@ -132,12 +136,12 @@ async def test_pause_resume_noop_when_disabled_or_not_paused() -> None:
 # ── 2. pause = clear + 위치 기억, resume = 되감은 위치부터 재전송 ───────
 
 
-async def test_pause_clears_engine_and_resume_resends_from_rewound_position() -> None:
+async def test_pause_clears_engine_and_resume_resends_from_rewound_position(profile) -> None:
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
 
-    await out.capture_frame(_pcm_frame(SAMPLE_RATE * 2))  # 2초 = 100 프레임, 즉시 큐잉
+    await out.capture_frame(_pcm_frame(profile.sample_rate * 2, profile))  # 2초 = 100 프레임, 즉시 큐잉
     out.flush()
     assert len(_sent(call)) == 100
     await asyncio.sleep(0.30)  # 0.3초 "재생"
@@ -154,20 +158,20 @@ async def test_pause_clears_engine_and_resume_resends_from_rewound_position() ->
     # 재개 지점 ≈ (0.30 - 0.12초 되감기) * 8000 = 1440B → 남은 (16000-1440)/160 = 91 프레임.
     # 시계 오차를 감안해 폭을 둔다 — 핵심은 "처음부터 다시" 도 "끝에서부터" 도 아니라는 것.
     assert 80 <= len(resent) <= 96, len(resent)
-    assert all(len(c) == FRAME_BYTES for c in resent)
+    assert all(len(c) == profile.frame_bytes for c in resent)
 
 
 # ── 3. clear 가 되돌린 옛 mark 는 재생 완료가 아니다 ─────────────────
 
 
-async def test_stale_mark_echoed_by_clear_does_not_finish_segment() -> None:
+async def test_stale_mark_echoed_by_clear_does_not_finish_segment(profile) -> None:
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
     events: list[io.PlaybackFinishedEvent] = []
     out.on("playback_finished", events.append)
 
-    await out.capture_frame(_pcm_frame(SAMPLE_RATE))  # 1초
+    await out.capture_frame(_pcm_frame(profile.sample_rate, profile))  # 1초
     out.flush()
     assert await _wait_for(lambda: len(ws.pending) == 1)  # mark1 이 엔진에 걸렸다
     await asyncio.sleep(0.1)
@@ -192,14 +196,14 @@ async def test_stale_mark_echoed_by_clear_does_not_finish_segment() -> None:
 # ── 4. 일시정지 중 진짜 끊김 → 멈춘 자리가 playback_position ───────────
 
 
-async def test_interrupt_while_paused_reports_pause_position() -> None:
+async def test_interrupt_while_paused_reports_pause_position(profile) -> None:
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
     events: list[io.PlaybackFinishedEvent] = []
     out.on("playback_finished", events.append)
 
-    await out.capture_frame(_pcm_frame(SAMPLE_RATE * 10))  # 10초
+    await out.capture_frame(_pcm_frame(profile.sample_rate * 10, profile))  # 10초
     out.flush()
     await asyncio.sleep(0.2)
     out.pause()
@@ -214,15 +218,15 @@ async def test_interrupt_while_paused_reports_pause_position() -> None:
 # ── 5. 첫 프레임 전에 pause 되면 들고 있다가 resume 에 내보낸다 ────────
 
 
-async def test_pause_before_first_frame_holds_audio_until_resume() -> None:
+async def test_pause_before_first_frame_holds_audio_until_resume(profile) -> None:
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
     events: list[io.PlaybackFinishedEvent] = []
     out.on("playback_finished", events.append)
 
     out.pause()  # SOS 가 먼저 왔다(_reconcile_playout_pause)
-    await out.capture_frame(_pcm_frame(4000))  # 0.5초
+    await out.capture_frame(_pcm_frame(profile.sample_rate // 2, profile))  # 0.5초
     out.flush()
     await asyncio.sleep(0.05)
     assert _sent(call) == []  # 아직 아무것도 안 나갔다
@@ -238,15 +242,15 @@ async def test_pause_before_first_frame_holds_audio_until_resume() -> None:
     assert events[0].playback_position == pytest.approx(0.5)
 
 
-async def test_pause_state_persists_into_next_segment() -> None:
+async def test_pause_state_persists_into_next_segment(profile) -> None:
     """LiveKit 은 pause 를 싱크 수준 상태로 본다 — 세그먼트가 바뀌어도 resume 전엔 내보내지 않는다."""
     ws = _EngineWs()
     call = _make_call(ws)
-    out = ClawOpsAudioOutput(call, pause=True)
+    out = ClawOpsAudioOutput(call, pause=True, media_profile=profile)
     events: list[io.PlaybackFinishedEvent] = []
     out.on("playback_finished", events.append)
 
-    await out.capture_frame(_pcm_frame(SAMPLE_RATE))
+    await out.capture_frame(_pcm_frame(profile.sample_rate, profile))
     out.flush()
     await asyncio.sleep(0.05)
     out.pause()
@@ -254,7 +258,7 @@ async def test_pause_state_persists_into_next_segment() -> None:
     assert await _wait_for(lambda: len(events) == 1)
     sent_before = len(_sent(call))
 
-    await out.capture_frame(_pcm_frame(1600))  # 다음 세그먼트 — 아직 paused
+    await out.capture_frame(_pcm_frame(profile.sample_rate // 5, profile))  # 다음 세그먼트 — 아직 paused
     await asyncio.sleep(0.02)
     assert len(_sent(call)) == sent_before
 

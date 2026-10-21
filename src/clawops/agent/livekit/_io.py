@@ -3,9 +3,9 @@
 LiveKit 의 AgentSession 은 room 없이도 동작한다 — `session.input.audio` /
 `session.output.audio` 에 커스텀 구현을 꽂으면 된다. 이 모듈이 그 구현이다.
 
-전화망 쪽 wire format 은 G.711 μ-law 8kHz, 160바이트(20ms) 프레임이다.
-AudioOutput 이 `sample_rate=8000` 을 선언하므로 프레임워크가 TTS 출력을 8kHz 로
-알아서 리샘플해준다. 우리는 μ-law 인코딩만 한다.
+기본 wire format 은 G.711 μ-law 8kHz, 160바이트(20ms)이다. 명시적으로 선택한
+PCM16 LE 16kHz 프로필은 640바이트(20ms)이다. AudioOutput 이 프로필의 샘플률을
+선언하므로 프레임워크가 TTS 출력을 맞춘다. 프로필은 prewarm 전에 고정한다.
 
 참조 구현: livekit `cli/tcp_console.py:TcpAudioOutput` — 같은 문제(비-WebRTC
 transport 를 AgentSession 에 물리기)를 푸는 LiveKit 자신의 코드다.
@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -56,6 +57,7 @@ from livekit import rtc
 from livekit.agents.voice import io
 
 from .._audio import pcm16_to_ulaw, ulaw_to_pcm16
+from ..media import MediaProfile
 
 log = logging.getLogger("clawops.agent.livekit")
 
@@ -84,28 +86,45 @@ _RESUME_REWIND_S = 0.12
 _SENTINEL = object()
 
 
-class ClawOpsAudioInput(io.AudioInput):
-    """통화 인바운드 오디오(μ-law) -> rtc.AudioFrame 스트림.
+def _swap_samples(pcm: bytes) -> bytes:
+    swapped = bytearray(len(pcm))
+    swapped[0::2], swapped[1::2] = pcm[1::2], pcm[0::2]
+    return bytes(swapped)
 
-    `LiveKitSession.feed_audio()` 가 `push_ulaw()` 로 밀어넣는다.
+
+class ClawOpsAudioInput(io.AudioInput):
+    """선택된 wire 오디오 -> rtc.AudioFrame 스트림.
+
+    `LiveKitSession.feed_audio()` 가 `push_audio()` 로 밀어넣는다.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, media_profile: MediaProfile = MediaProfile.MULAW_8000) -> None:
         super().__init__(label="ClawOps")
+        self._profile = MediaProfile(media_profile)
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
 
-    def push_ulaw(self, ulaw: bytes) -> None:
-        """G.711 μ-law 청크를 PCM16 프레임으로 바꿔 큐에 넣는다."""
-        pcm = ulaw_to_pcm16(ulaw)
+    def push_audio(self, audio: bytes) -> None:
+        """Decode the selected wire contract to native-endian LiveKit PCM16."""
+        pcm = ulaw_to_pcm16(audio) if self._profile is MediaProfile.MULAW_8000 else audio
         if not pcm:
             return
+        if len(pcm) % 2:
+            raise ValueError("PCM16 audio must contain complete samples")
+        if sys.byteorder != "little":
+            pcm = _swap_samples(pcm)
         frame = rtc.AudioFrame(
             data=pcm,
-            sample_rate=SAMPLE_RATE,
+            sample_rate=self._profile.sample_rate,
             num_channels=1,
             samples_per_channel=len(pcm) // 2,
         )
         self._queue.put_nowait(frame)
+
+    def push_ulaw(self, ulaw: bytes) -> None:
+        """Legacy μ-law entry point; never reinterpret it as PCM."""
+        if self._profile is not MediaProfile.MULAW_8000:
+            raise ValueError("push_ulaw requires the mulaw_8000 profile")
+        self.push_audio(ulaw)
 
     def end_input(self) -> None:
         """스트림 종료 — `__anext__` 가 StopAsyncIteration 을 내게 한다."""
@@ -119,7 +138,7 @@ class ClawOpsAudioInput(io.AudioInput):
 
 
 class ClawOpsAudioOutput(io.AudioOutput):
-    """AgentSession 출력 -> μ-law 160바이트 프레임 -> CallSession.send_audio().
+    """AgentSession 출력 -> 선택된 wire 프레임 -> CallSession.send_audio().
 
     재생 완료(playout) 판정은 Media WS 의 `mark` 로 한다 — 플랫폼이 큐에 쌓인
     오디오를 다 내보낸 뒤 mark 를 에코해준다. prewarm 중(`_BufferingCall`)에는
@@ -131,17 +150,21 @@ class ClawOpsAudioOutput(io.AudioOutput):
     동작이 달라진다. 켜는 쪽(러너·에이전트)이 결정한다.
     """
 
-    def __init__(self, call: Any, *, pause: bool = False) -> None:
+    def __init__(
+        self, call: Any, *, pause: bool = False,
+        media_profile: MediaProfile = MediaProfile.MULAW_8000,
+    ) -> None:
+        self._profile = MediaProfile(media_profile)
         super().__init__(
             label="ClawOps",
             next_in_chain=None,
-            sample_rate=SAMPLE_RATE,
+            sample_rate=self._profile.sample_rate,
             capabilities=io.AudioOutputCapabilities(pause=pause),
         )
         self._call = call
         # ── 세그먼트 상태(flush 태스크가 닫을 때 리셋) ──
         self._pushed_duration: float = 0.0  # 캡처된 오디오 총 길이(초)
-        self._seg = bytearray()  # 이 세그먼트의 μ-law 전체 — 재개 재전송용
+        self._seg = bytearray()  # 이 세그먼트의 wire 오디오 전체 — 재개 재전송용
         self._sent = 0  # _seg 중 엔진으로 보낸 바이트 수
         self._segment_closed = False  # flush() 가 불렸다(자투리까지 내보낸다)
         # ── 재생 위치 추정 기준점: 기준 바이트 + 그 시각 ──
@@ -178,6 +201,15 @@ class ClawOpsAudioOutput(io.AudioOutput):
     # ── AudioOutput 구현 ────────────────────────────────────────
 
     async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+        if self._profile is MediaProfile.PCM_S16LE_16000 and (
+            frame.sample_rate != self._profile.sample_rate or frame.num_channels != 1
+        ):
+            raise ValueError("Audio frame must match the selected sample rate and mono channels")
+        pcm = bytes(frame.data)
+        if self._profile is MediaProfile.PCM_S16LE_16000 and len(pcm) != frame.samples_per_channel * 2:
+            raise ValueError("PCM16 audio must contain complete samples")
+        if sys.byteorder != "little":
+            pcm = _swap_samples(pcm)
         await super().capture_frame(frame)
 
         # 이전 세그먼트의 flush 가 아직 진행 중이면 기다린다 (TcpAudioOutput 과 동일).
@@ -190,7 +222,7 @@ class ClawOpsAudioOutput(io.AudioOutput):
             self.on_playback_started(created_at=time.time())
 
         self._pushed_duration += frame.duration
-        self._seg += pcm16_to_ulaw(bytes(frame.data))
+        self._seg += pcm16_to_ulaw(pcm) if self._profile is MediaProfile.MULAW_8000 else pcm
         await self._pump()
 
     def flush(self) -> None:
@@ -224,14 +256,14 @@ class ClawOpsAudioOutput(io.AudioOutput):
         self._paused = True
         self._mark_gen += 1  # 이 이후 엔진이 되돌려 주는 옛 mark 는 재생 완료가 아니다
         self._pause_pos = pos
-        rewind = int(_RESUME_REWIND_S * SAMPLE_RATE)
-        self._resume_from = max(0, pos - rewind) // FRAME_BYTES * FRAME_BYTES
+        rewind = int(_RESUME_REWIND_S * self._profile.bytes_per_second)
+        self._resume_from = max(0, pos - rewind) // self._profile.frame_bytes * self._profile.frame_bytes
         self._playing = False  # 재개 시 기준점을 새로 잡는다
         if self._sent:
             self._spawn(self._call.clear_audio())
         log.debug(
             "audio output paused",
-            extra={"played_ms": pos * 1000 // SAMPLE_RATE, "sent_bytes": self._sent},
+            extra={"played_ms": pos * 1000 // self._profile.bytes_per_second, "sent_bytes": self._sent},
         )
 
     def resume(self) -> None:
@@ -278,11 +310,12 @@ class ClawOpsAudioOutput(io.AudioOutput):
             return self._pause_pos
         if not self._playing:
             return 0
-        elapsed = int((time.monotonic() - self._origin_time) * SAMPLE_RATE)
-        return max(0, min(self._sent, self._origin_bytes + elapsed))
+        elapsed = int((time.monotonic() - self._origin_time) * self._profile.bytes_per_second)
+        played = max(0, min(self._sent, self._origin_bytes + elapsed))
+        return played // self._profile.bytes_per_sample * self._profile.bytes_per_sample
 
     async def _pump(self) -> None:
-        """_seg 의 아직 안 보낸 부분을 160바이트 프레임으로 보낸다.
+        """_seg 의 아직 안 보낸 부분을 선택된 20ms 프레임으로 보낸다.
 
         세그먼트가 닫혔으면(flush 뒤) 자투리도 그대로 내보낸다 — 예전엔 여기서 무음으로
         채워 160바이트를 맞췄는데 그게 발화 한가운데 0~19ms 짜리 구멍을 만들고 있었다
@@ -296,11 +329,12 @@ class ClawOpsAudioOutput(io.AudioOutput):
             self._sent = min(self._sent, len(self._seg))
             avail = len(self._seg) - self._sent
             if self._segment_closed:
-                if avail and avail % FRAME_BYTES and _TAIL_PAD:
-                    self._seg += ULAW_SILENCE * (FRAME_BYTES - avail % FRAME_BYTES)
+                if avail and avail % self._profile.frame_bytes and _TAIL_PAD:
+                    padding = self._profile.frame_bytes - avail % self._profile.frame_bytes
+                    self._seg += self._profile.silence_byte * padding
                 end = len(self._seg)
             else:
-                end = self._sent + avail // FRAME_BYTES * FRAME_BYTES
+                end = self._sent + avail // self._profile.frame_bytes * self._profile.frame_bytes
             if end <= self._sent:
                 return
             if not self._playing:
@@ -311,7 +345,7 @@ class ClawOpsAudioOutput(io.AudioOutput):
             call = self._call
             off = self._sent
             while off < end:
-                chunk = bytes(self._seg[off : min(off + FRAME_BYTES, end)])
+                chunk = bytes(self._seg[off : min(off + self._profile.frame_bytes, end)])
                 await call.send_audio(chunk)
                 off += len(chunk)
             self._sent = end
@@ -375,7 +409,7 @@ class ClawOpsAudioOutput(io.AudioOutput):
             # ⚠️ 계약 3: 세그먼트당 정확히 한 번 — 취소되더라도 반드시 emit 한다.
             #    (안 그러면 segment count 가 어긋나 wait_for_playout 이 영구 대기한다.)
             if interrupted:
-                played = min(self._estimate_played_bytes() / SAMPLE_RATE, self._pushed_duration)
+                played = min(self._estimate_played_bytes() / self._profile.bytes_per_second, self._pushed_duration)
             else:
                 played = self._pushed_duration
             self.on_playback_finished(playback_position=played, interrupted=interrupted)
