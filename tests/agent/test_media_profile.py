@@ -114,3 +114,10 @@ async def test_websocket_gates_prewarm_audio_until_start_format_is_validated(mat
     finally:
         await ws.close()
         await runner.cleanup()
+
+
+def test_default_start_event_keeps_exact_legacy_shape():
+    assert parse_start_event({"start": {"streamId": "s", "callId": "c", "accountId": "a",
+        "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1}}}) == {
+        "stream_id": "s", "call_id": "c", "account_id": "a", "sample_rate": 8000,
+    }

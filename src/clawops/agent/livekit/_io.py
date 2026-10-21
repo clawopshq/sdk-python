@@ -201,10 +201,12 @@ class ClawOpsAudioOutput(io.AudioOutput):
     # ── AudioOutput 구현 ────────────────────────────────────────
 
     async def capture_frame(self, frame: rtc.AudioFrame) -> None:
-        if frame.sample_rate != self._profile.sample_rate or frame.num_channels != 1:
+        if self._profile is MediaProfile.PCM_S16LE_16000 and (
+            frame.sample_rate != self._profile.sample_rate or frame.num_channels != 1
+        ):
             raise ValueError("Audio frame must match the selected sample rate and mono channels")
         pcm = bytes(frame.data)
-        if len(pcm) != frame.samples_per_channel * 2:
+        if self._profile is MediaProfile.PCM_S16LE_16000 and len(pcm) != frame.samples_per_channel * 2:
             raise ValueError("PCM16 audio must contain complete samples")
         if sys.byteorder != "little":
             pcm = _swap_samples(pcm)

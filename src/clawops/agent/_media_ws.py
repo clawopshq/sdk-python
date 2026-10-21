@@ -34,8 +34,6 @@ def parse_start_event(data: dict[str, Any]) -> dict[str, Any]:
         "call_id": start["callId"],
         "account_id": start.get("accountId", ""),
         "sample_rate": fmt.get("sampleRate", 8000),
-        "encoding": fmt.get("encoding", "audio/x-mulaw"),
-        "channels": fmt.get("channels", 1),
     }
 
 
@@ -149,7 +147,12 @@ class MediaWebSocket:
                     if event == "start":
                         info = parse_start_event(data)
                         if self._expected_media_profile is not None:
-                            self._expected_media_profile.validate_start(info)
+                            fmt = data["start"].get("mediaFormat", {})
+                            self._expected_media_profile.validate_start({
+                                **info,
+                                "encoding": fmt.get("encoding", "audio/x-mulaw"),
+                                "channels": fmt.get("channels", 1),
+                            })
                             self._format_validated.set()
                         await self._on_start(info)
                     elif event == "media":
