@@ -19,6 +19,7 @@ from livekit.agents import Agent, AgentSession
 from livekit.agents.llm import function_tool
 from livekit.agents.llm.tool_context import get_fnc_tool_names
 from livekit.agents.utils import http_context, is_given
+from livekit.agents.voice.io import TextOutput
 from livekit.agents.voice.transcription import TranscriptSynchronizer
 
 from .._session import CallSession
@@ -197,8 +198,13 @@ class LiveKitSession:
         # ⚠️ TranscriptSynchronizer 는 필수다. room 없이는 이걸 안 씌우면
         # barge-in 시 synchronized_transcript 가 None 이라 LLM 컨텍스트에
         # "말하지 않은 전체 텍스트"가 기록된다. _io.py 계약 1 참조.
+        # 동기화기가 재생 속도에 맞춰 내보내는 텍스트를 `transcript_delta` 훅으로 흘린다.
+        # 종전엔 next_in_chain_text=None 이라 그대로 버려졌다. _TranscriptDeltaOutput 참조.
         sync = TranscriptSynchronizer(
-            next_in_chain_audio=self._output, next_in_chain_text=None
+            next_in_chain_audio=self._output,
+            next_in_chain_text=_TranscriptDeltaOutput(
+                lambda text: self._forward_event("transcript_delta", "assistant", text)
+            ),
         )
         session.input.audio = self._input
         session.output.audio = sync.audio_output
@@ -274,15 +280,57 @@ class LiveKitSession:
 
         session.on("conversation_item_added", _on_item)
 
+        def _on_user_transcribed(ev: Any) -> None:
+            # 발신자 중간 전사 → `transcript_delta`. 확정(is_final)은 위 대화 항목이 `transcript`
+            # 로 내보내므로 여기서는 건너뛴다. LiveKit 의 중간 전사는 그 발화의 누적 문장이라
+            # 앞부분이 고쳐 쓰일 수 있다 — 그대로 넘긴다.
+            if getattr(ev, "is_final", True):
+                return
+            text = getattr(ev, "transcript", "") or ""
+            if not text.strip():
+                return
+            self._forward_event("transcript_delta", "user", text)
+
+        session.on("user_input_transcribed", _on_user_transcribed)
+
     def _forward_transcript(self, role: str, text: str) -> None:
+        self._forward_event("transcript", role, text)
+
+    def _forward_event(self, event: str, *args: Any) -> None:
         # 동기 콜백에서 async _emit 을 태워야 하므로 태스크로 띄운다. prewarm 중이면
         # _target 이 _BufferingCall 이라 _emit 이 드롭 카운트로 흡수한다 (무해).
         target = self._target
         if target is None:
             return
-        task = asyncio.create_task(target._emit("transcript", role, text))
+        task = asyncio.create_task(target._emit(event, *args))
         self._emit_tasks.add(task)
         task.add_done_callback(self._emit_tasks.discard)
+
+
+class _TranscriptDeltaOutput(TextOutput):
+    """동기화기 다음 칸 — 재생에 맞춰 나오는 에이전트 텍스트를 **누적**해 콜백으로 넘긴다.
+
+    `TranscriptSynchronizer` 는 오디오 재생 위치에 맞춰 텍스트를 조각으로 흘린다. 조각만 넘기면
+    받는 쪽이 이어 붙여야 하고 한 조각을 놓치면 어긋나므로, 세그먼트(한 번의 발화) 안에서 누적한
+    문장을 매번 넘긴다. `flush()` 가 세그먼트 끝이다 — 누적을 비운다.
+
+    ⚠️ 끊긴 발화는 마지막 누적이 실제 재생보다 한 단어쯤 앞설 수 있다(동기화기가 단어를 재생 직전에
+    내보낸다). 재생된 데까지 자른 확정본은 `transcript` 훅이 따로 준다.
+    """
+
+    def __init__(self, on_text: Callable[[str], None]) -> None:
+        super().__init__(label="ClawOpsTranscriptDelta", next_in_chain=None)
+        self._on_text = on_text
+        self._text = ""
+
+    async def capture_text(self, text: str) -> None:
+        if not text:
+            return
+        self._text += text
+        self._on_text(self._text)
+
+    def flush(self) -> None:
+        self._text = ""
 
 
 def _resolve(session: AgentSession[None], agent: Agent, attr: str) -> Any:

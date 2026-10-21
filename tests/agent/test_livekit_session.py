@@ -272,6 +272,82 @@ async def test_empty_transcript_item_is_skipped() -> None:
     await lk.stop()
 
 
+# ── transcript_delta 훅 (말하는 도중 텍스트) ─────────────────────
+
+
+async def test_delta_output_accumulates_within_segment() -> None:
+    """동기화 텍스트 조각은 세그먼트 안에서 누적해 넘기고, flush 뒤에는 새로 시작한다."""
+    from clawops.agent.livekit._session import _TranscriptDeltaOutput
+
+    got: list[str] = []
+    out = _TranscriptDeltaOutput(got.append)
+    await out.capture_text("평일 오전 ")
+    await out.capture_text("")  # 빈 조각은 무시
+    await out.capture_text("9시부터")
+    out.flush()
+    await out.capture_text("네")
+
+    assert got == ["평일 오전 ", "평일 오전 9시부터", "네"]
+
+
+async def test_synchronizer_text_chain_ends_in_delta_output() -> None:
+    """동기화기 텍스트가 버려지지 않고 delta 출력으로 이어져야 한다(종전 next_in_chain_text=None)."""
+    from clawops.agent.livekit._session import _TranscriptDeltaOutput
+
+    lk = LiveKitSession(_create_fn())
+    await lk.start(_make_call())
+
+    chain = lk._session.output.transcription  # type: ignore[union-attr]
+    assert chain is not None
+    assert isinstance(chain.next_in_chain, _TranscriptDeltaOutput)
+    await lk.stop()
+
+
+async def test_agent_text_reaches_transcript_delta_hook() -> None:
+    """동기화기 다음 칸에 들어온 텍스트가 ("assistant", 누적) 으로 `transcript_delta` 훅에 닿는다."""
+    call = _make_call()
+    got: list[tuple[str, str]] = []
+
+    async def on_delta(c: object, role: str, text: str) -> None:
+        got.append((role, text))
+
+    call._event_handlers = {"transcript_delta": [on_delta]}
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    delta = lk._session.output.transcription.next_in_chain  # type: ignore[union-attr]
+    await delta.capture_text("안녕")
+    await delta.capture_text("하세요")
+    await asyncio.sleep(0.05)
+
+    assert got == [("assistant", "안녕"), ("assistant", "안녕하세요")]
+    await lk.stop()
+
+
+async def test_user_interim_reaches_transcript_delta_hook_but_final_does_not() -> None:
+    """발신자 중간 전사는 ("user", 누적문장) 으로 나가고, 확정·빈 전사는 나가지 않는다."""
+    from livekit.agents.voice.events import UserInputTranscribedEvent
+
+    call = _make_call()
+    got: list[tuple[str, str]] = []
+
+    async def on_delta(c: object, role: str, text: str) -> None:
+        got.append((role, text))
+
+    call._event_handlers = {"transcript_delta": [on_delta]}
+    lk = LiveKitSession(_create_fn())
+    await lk.start(call)
+
+    for text, final in (("예약", False), ("  ", False), ("예약을 변경", False), ("예약을 변경하고 싶어요", True)):
+        lk._session.emit(  # type: ignore[union-attr]
+            "user_input_transcribed", UserInputTranscribedEvent(transcript=text, is_final=final)
+        )
+    await asyncio.sleep(0.05)
+
+    assert got == [("user", "예약"), ("user", "예약을 변경")]
+    await lk.stop()
+
+
 # ── 내장 도구 on/off ────────────────────────────────────────────
 
 
