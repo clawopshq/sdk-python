@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
@@ -226,6 +227,31 @@ class MediaWebSocket:
         finally:
             # timeout·cancel·정상 완료 모두 waiter 를 회수한다.
             # (정상 echo 경로에서는 이미 pop 됐으므로 pop(name, None) 은 no-op.)
+            self._mark_waiters.pop(name, None)
+
+    async def wait_played_out(self, timeout: float) -> bool:
+        """지금까지 보낸 오디오가 발신자에게 다 재생될 때까지 기다린다. 재생 끝 echo 를 받았으면 True.
+
+        서버는 mark 앞의 오디오를 RTP 로 다 내보낸 뒤 mark 를 돌려주고, ``clear`` 때는 남은
+        mark 를 즉시 돌려준다(Twilio Media Streams 와 같은 의미). 그래서 순서가 둘 다 중요하다.
+        - 오디오는 송신 큐를 거치고 mark 는 바로 나가므로, 큐를 먼저 비워야 mark 가 오디오를
+          앞지르지 않는다.
+        - 재생할 게 없으면 echo 가 곧장 오므로, waiter 를 **보내기 전에** 걸어 둬야 놓치지 않는다
+          (``send_mark`` → ``wait_for_mark`` 순서는 그 사이에 온 echo 를 흘린다).
+        """
+        if not self.is_connected:
+            return False
+        await self.flush()
+        name = f"playout-{uuid.uuid4().hex[:12]}"
+        evt = asyncio.Event()
+        self._mark_waiters[name] = evt
+        try:
+            await self.send_mark(name)
+            await asyncio.wait_for(evt.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
             self._mark_waiters.pop(name, None)
 
     async def _send_loop(self) -> None:

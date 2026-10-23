@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator
 
 from .._audio import ulaw_to_pcm16, pcm16_to_ulaw, resample_pcm16
 from .._builtin_tools import BuiltinTool
-from .._hold_audio import HoldAudioPlayer
+from .._hold_audio import HoldAudioPlayer, hold_audio_allowed
 from .._recorder import AudioRecorder
 from .._session import CallSession
 from .._tool import ToolRegistry
@@ -359,7 +359,11 @@ class PipelineSession:
         )
 
         player = (
-            HoldAudioPlayer(self._call, self._hold_audio_chunks) if self._hold_audio_chunks and self._call else None
+            HoldAudioPlayer(self._call, self._hold_audio_chunks)
+            if self._hold_audio_chunks
+            and self._call
+            and hold_audio_allowed(tc["function"]["name"] for tc in tool_calls)
+            else None
         )
         if player:
             await player.start()
