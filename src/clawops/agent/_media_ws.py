@@ -91,6 +91,10 @@ def _redact_url(url: str) -> str:
     return urlparse(url)._replace(query="", fragment="").geturl()
 
 
+# 재생 끝 mark 를 보내기 전에 새 오디오가 이만큼 안 들어와야 한다(조각 TTS 대비).
+PLAYOUT_QUIET_S = 0.3
+
+
 class MediaWebSocket:
     """통화 하나의 미디어 스트림.
 
@@ -126,6 +130,7 @@ class MediaWebSocket:
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._send_task: asyncio.Task[None] | None = None
         self._mark_waiters: dict[str, asyncio.Event] = {}
+        self._last_audio_at = 0.0
 
     async def connect(self) -> None:
         if self._expected_media_profile is not None:
@@ -177,6 +182,7 @@ class MediaWebSocket:
             await self.close()
 
     async def send_audio(self, audio: bytes) -> None:
+        self._last_audio_at = time.monotonic()
         self._audio_queue.put_nowait(audio)
 
     async def send_clear(self) -> None:
@@ -241,14 +247,24 @@ class MediaWebSocket:
         """
         if not self.is_connected:
             return False
-        await self.flush()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        # 오디오가 조각조각 이어서 들어오는 중이면(LiveKit 처럼 TTS 를 만들면서 흘려 보내는 경로)
+        # 큐가 잠깐 빈 틈에 mark 를 보내 안내 앞부분만 재생된 시점을 끝으로 볼 수 있다. 새 오디오가
+        # PLAYOUT_QUIET_S 동안 안 들어올 때까지 기다린 뒤 보낸다.
+        while True:
+            await self.flush()
+            quiet_for = time.monotonic() - self._last_audio_at
+            if quiet_for >= PLAYOUT_QUIET_S or loop.time() >= deadline:
+                break
+            await asyncio.sleep(PLAYOUT_QUIET_S - quiet_for)
         name = f"playout-{uuid.uuid4().hex[:12]}"
         evt = asyncio.Event()
         self._mark_waiters[name] = evt
         try:
             await self.send_mark(name)
-            await asyncio.wait_for(evt.wait(), timeout=timeout)
-            return True
+            await asyncio.wait_for(evt.wait(), timeout=max(0.0, deadline - loop.time()))
+            return self.is_connected
         except asyncio.TimeoutError:
             return False
         finally:
@@ -283,6 +299,9 @@ class MediaWebSocket:
         await self.close()
 
     async def close(self) -> None:
+        # 기다리던 mark 는 이제 안 온다 — 상한까지 붙잡지 말고 깨운다.
+        for evt in self._mark_waiters.values():
+            evt.set()
         self._audio_queue.put_nowait(None)
         if self._send_task and not self._send_task.done():
             self._send_task.cancel()

@@ -1413,6 +1413,7 @@ class ClawOpsAgent:
             return
 
         call._passive_dtmf_buffer.append(digit)
+        call._passive_dtmf_confirm_now = lambda: self._confirm_passive_dtmf(call)
         if self._passive_dtmf_max_digits is not None and len(call._passive_dtmf_buffer) >= self._passive_dtmf_max_digits:
             self._confirm_passive_dtmf(call)
             return
@@ -1446,8 +1447,12 @@ class ClawOpsAgent:
         await self._feed_passive_dtmf(call, digits)
 
     async def _feed_passive_dtmf(self, call: CallSession, digits: str) -> None:
-        # 값은 카드번호일 수 있다 — 자릿수만 남긴다.
-        log.info("키패드 입력 %d자리 자동 전달 (call=%s)", len(digits), call.call_id)
-        session_obj = self._call_sessions.get(call.call_id)
-        if session_obj:
-            await session_obj.feed_dtmf(digits)
+        # 종료키·자리 수 확정은 대기 없이 연달아 올 수 있다(1#2#). 한 통화 안에선 차례로 보낸다.
+        if call._passive_dtmf_feed_lock is None:
+            call._passive_dtmf_feed_lock = asyncio.Lock()
+        async with call._passive_dtmf_feed_lock:
+            # 값은 카드번호일 수 있다 — 자릿수만 남긴다.
+            log.info("키패드 입력 %d자리 자동 전달 (call=%s)", len(digits), call.call_id)
+            session_obj = self._call_sessions.get(call.call_id)
+            if session_obj:
+                await session_obj.feed_dtmf(digits)

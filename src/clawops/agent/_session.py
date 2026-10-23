@@ -83,6 +83,11 @@ class CallSession:
         # debounce 값이 에이전트 설정이라서다.
         self._passive_dtmf_buffer: list[str] = []
         self._passive_dtmf_task: asyncio.Task[None] | None = None
+        # 버퍼에 남은 키를 대기 없이 확정하는 함수. ClawOpsAgent 가 버퍼에 키를 넣을 때 건다 —
+        # collect_dtmf 가 열릴 때 부른다.
+        self._passive_dtmf_confirm_now: Callable[[], None] | None = None
+        # 한 통화의 자동 전달은 차례로 보낸다(OpenAI 는 주입이 두 번의 호출이라 겹치면 응답이 둘 생긴다).
+        self._passive_dtmf_feed_lock: asyncio.Lock | None = None
 
     def bind_transport(
         self,
@@ -187,7 +192,11 @@ class CallSession:
         if wait_played_out is None:
             return
         t0 = time.monotonic()
-        played = await wait_played_out(limit)
+        try:
+            played = await wait_played_out(limit)
+        except Exception as e:  # noqa: BLE001 — 끊기는 소켓에서 mark 전송이 실패할 수 있다. 그때부터 센다.
+            log.info("키패드 수집: 안내 재생 끝 확인 실패 (%s)", type(e).__name__)
+            return
         log.info(
             "키패드 수집: 안내 재생 끝 %.2fs%s", time.monotonic() - t0, "" if played else " (확인 못 함)"
         )
@@ -225,6 +234,11 @@ class CallSession:
             raise DtmfCollectorBusy("이미 DTMF 수집 중입니다")
 
         self._dtmf_collector_active = True
+        # 수집 직전에 눌러 아직 자동 전달 대기 중인 키는 지금 모델에 넘긴다. 수집으로 가져오면
+        # 앞 질문의 답(동의 1 등)이 섞이고, 버리면 잃는다. 2초 대기 동안 기다리게 두면 도구 호출이
+        # 걸린 채로 늦게 들어간다.
+        if self._passive_dtmf_buffer and self._passive_dtmf_confirm_now is not None:
+            self._passive_dtmf_confirm_now()
         # 구간 밖 키가 남아 있으면 버린다(방어 — 정상 경로에선 비어 있다).
         while not self._dtmf_queue.empty():
             self._dtmf_queue.get_nowait()

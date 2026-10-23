@@ -319,3 +319,125 @@ def test_키를_받는_도구에는_대기음을_틀지_않는다():
     assert hold_audio_allowed(["lookup_order"]) is True
     assert hold_audio_allowed(["collect_dtmf"]) is False
     assert hold_audio_allowed(["lookup_order", "collect_dtmf"]) is False
+
+
+# ── 코드 리뷰 반영 ──
+
+
+@pytest.mark.asyncio
+async def test_소켓이_닫히면_재생_끝_대기가_바로_풀린다():
+    """통화가 끊겨 mark 가 영영 안 와도 상한(30초)까지 붙잡지 않는다."""
+    mws = MediaWebSocket(url="wss://example.invalid/media", on_audio=None, on_start=None, on_stop=None)
+
+    class SilentWs:
+        closed = False
+
+        async def send_str(self, raw: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            self.closed = True
+
+    mws._ws = SilentWs()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    task = asyncio.create_task(mws.wait_played_out(timeout=30))
+    await asyncio.sleep(0.05)
+    await mws.close()
+    assert await task is False
+    assert loop.time() - t0 < 1.0
+
+
+@pytest.mark.asyncio
+async def test_오디오가_이어서_들어오는_동안엔_mark_를_보내지_않는다():
+    """TTS 를 만들면서 조각조각 흘려 보내는 경로에서 큐가 잠깐 빈 틈을 재생 끝으로 보지 않는다."""
+    from clawops.agent._media_ws import PLAYOUT_QUIET_S
+
+    mws = MediaWebSocket(url="wss://example.invalid/media", on_audio=None, on_start=None, on_stop=None)
+    sent_at: list[float] = []
+    loop = asyncio.get_running_loop()
+
+    class EchoWs:
+        closed = False
+
+        async def send_str(self, raw: str) -> None:
+            msg = json.loads(raw)
+            if msg.get("event") == "mark":
+                sent_at.append(loop.time())
+                mws._mark_waiters[msg["mark"]["name"]].set()
+
+    mws._ws = EchoWs()
+
+    async def trickle() -> None:
+        # 0.1초마다 한 조각씩 0.5초 동안 — 큐는 매번 바로 비지만 오디오는 아직 오는 중이다.
+        for _ in range(5):
+            await mws.send_audio(b"\xff" * 160)
+            mws._audio_queue.get_nowait()
+            await asyncio.sleep(0.1)
+
+    feeder = asyncio.create_task(trickle())
+    await asyncio.sleep(0.01)
+    t0 = loop.time()
+    assert await mws.wait_played_out(timeout=5) is True
+    await feeder
+    # 마지막 조각(≈0.4초) 뒤 조용한 구간이 지나서야 mark 를 보낸다.
+    assert sent_at[0] - t0 >= 0.4 + PLAYOUT_QUIET_S - 0.05
+
+
+@pytest.mark.asyncio
+async def test_수집이_열리면_대기_중인_자동_전달_키를_바로_넘긴다():
+    """수집 직전 키는 수집에 섞이지도, 잃지도, 2초 늦게 도구 호출 중에 들어가지도 않는다."""
+    agent = make_agent(passive_dtmf_debounce_ms=5000)
+    s = RecordingSession()
+    call = attach_call(agent, s)
+
+    agent._on_dtmf_event(call, "1")  # 5초 대기 중
+    task = asyncio.create_task(call.collect_dtmf(max_digits=3, timeout=0.2))
+    await asyncio.sleep(0.05)
+    assert s.fed == ["1"], "수집이 열릴 때 대기 중이던 키를 넘기지 않았다"
+    for d in "534":
+        agent._on_dtmf_event(call, d)
+    assert await task == "534"
+    await asyncio.sleep(0.05)
+    assert s.fed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_연달아_확정된_자동_전달은_차례로_보낸다():
+    """1#2# 처럼 대기 없이 확정이 이어져도 주입이 겹치지 않는다."""
+    agent = make_agent(passive_dtmf_debounce_ms=5000)
+    in_flight = 0
+    max_in_flight = 0
+    fed: list[str] = []
+
+    class SlowSession:
+        async def feed_dtmf(self, digits: str) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.05)
+            fed.append(digits)
+            in_flight -= 1
+
+    call = attach_call(agent, SlowSession())
+    for d in "1#2#":
+        agent._on_dtmf_event(call, d)
+    await asyncio.sleep(0.3)
+    assert fed == ["1", "2"]
+    assert max_in_flight == 1
+
+
+@pytest.mark.asyncio
+async def test_재생_끝_확인이_실패해도_수집은_계속된다():
+    call = new_call()
+
+    class BrokenPlayout:
+        async def wait_played_out(self, timeout: float) -> bool:
+            raise ConnectionResetError("closing")
+
+    call._media_ws = BrokenPlayout()
+    task = asyncio.create_task(call.collect_dtmf(max_digits=2, timeout=0.2))
+    await asyncio.sleep(0.02)
+    for d in "12":
+        call._route_dtmf(d)
+    assert await task == "12"

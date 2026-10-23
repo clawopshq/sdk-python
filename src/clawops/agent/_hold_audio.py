@@ -155,8 +155,8 @@ def load_hold_audio(source: bool | str | bytes) -> list[bytes]:
     raise TypeError(f"지원하지 않는 hold_audio 타입: {type(source)}")
 
 
-# 발신자에게 키를 받는 도구. 이게 끼어 있는 묶음엔 대기음을 틀지 않는다 — 대기음이 안내를
-# 덮고, 송신 큐가 영영 안 비어 collect_dtmf 가 안내 재생 끝을 기다리다 상한까지 간다.
+# 발신자에게 키를 받는 도구. 이게 끼어 있는 묶음엔 대기음을 틀지 않는다 — 발신자가 키를
+# 누를 차례에 대기음이 안내를 덮고, 수집 내내 「기다리세요」 소리를 낸다.
 _NO_HOLD_AUDIO_TOOLS = frozenset({"collect_dtmf"})
 
 
