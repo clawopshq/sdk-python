@@ -1451,6 +1451,9 @@ class ClawOpsAgent:
         if call._passive_dtmf_feed_lock is None:
             call._passive_dtmf_feed_lock = asyncio.Lock()
         async with call._passive_dtmf_feed_lock:
+            # 앞선 주입을 기다리는 사이 통화가 끝났으면 보내지 않는다.
+            if call._ended_event.is_set():
+                return
             # 값은 카드번호일 수 있다 — 자릿수만 남긴다.
             log.info("키패드 입력 %d자리 자동 전달 (call=%s)", len(digits), call.call_id)
             session_obj = self._call_sessions.get(call.call_id)

@@ -441,3 +441,22 @@ async def test_재생_끝_확인이_실패해도_수집은_계속된다():
     for d in "12":
         call._route_dtmf(d)
     assert await task == "12"
+
+
+@pytest.mark.asyncio
+async def test_앞선_주입을_기다리는_사이_통화가_끝나면_남은_주입을_보내지_않는다():
+    agent = make_agent(passive_dtmf_debounce_ms=5000)
+    fed: list[str] = []
+
+    class SlowSession:
+        async def feed_dtmf(self, digits: str) -> None:
+            await asyncio.sleep(0.06)
+            fed.append(digits)
+
+    call = attach_call(agent, SlowSession())
+    for d in "1#2#":  # '1' 주입 중에 '2' 가 줄 선다
+        agent._on_dtmf_event(call, d)
+    await asyncio.sleep(0.02)
+    call._mark_ended()
+    await asyncio.sleep(0.2)
+    assert fed == ["1"]
