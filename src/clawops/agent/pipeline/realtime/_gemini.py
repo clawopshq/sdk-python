@@ -24,7 +24,7 @@ except ImportError:
 
 from ..._audio import pcm16_to_ulaw, resample_pcm16, ulaw_to_pcm16
 from ..._builtin_tools import BuiltinTool
-from ..._hold_audio import HoldAudioPlayer
+from ..._hold_audio import HoldAudioPlayer, hold_audio_allowed
 from ..._recorder import AudioRecorder
 from ..._session import CallSession
 from ..._tool import TOOL_BEHAVIORS, TOOL_SCHEDULINGS, ToolRegistry
@@ -859,7 +859,11 @@ class GeminiRealtime:
         responses: list[types.FunctionResponse] = []
 
         player = (
-            HoldAudioPlayer(self._call, self._hold_audio_chunks) if self._hold_audio_chunks and self._call else None
+            HoldAudioPlayer(self._call, self._hold_audio_chunks)
+            if self._hold_audio_chunks
+            and self._call
+            and hold_audio_allowed(getattr(fc, "name", "") for fc in function_calls)
+            else None
         )
         if player:
             await player.start()

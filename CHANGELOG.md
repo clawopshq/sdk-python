@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.70.0 (2026-10-23)
+
+키패드(DTMF) 입력을 Twilio `<Gather>`·LiveKit `GetDtmfTask`·Pipecat `DTMFAggregator` 와 같은 방식으로 맞췄습니다.
+
+### Changed
+- **동작 변경: 키패드 자동 전달의 기본 대기가 0.5초에서 2초로 바뀝니다(`passive_dtmf_debounce_ms=2000`).**
+  누른 키는 마지막 키 뒤 2초가 지나면 `[DTMF 입력: 534]` 로 모델에 전달됩니다. 0.5초는 사람이 누르는 간격보다 짧아
+  `534` 가 `5`·`3`·`4` 로 나뉘어 들어갔습니다. 종전 값이 필요하면 `passive_dtmf_debounce_ms=500` 을 넣으세요.
+- **동작 변경: `#` 을 누르면 그때까지 누른 키를 바로 전달합니다(`passive_dtmf_finish_key="#"`).** `#` 은 값에 들어가지 않습니다.
+  아무 키 없이 `#` 만 누르면 `[DTMF 입력: #]` 를 전달합니다. 종전처럼 `#` 을 일반 키로 쓰려면 `passive_dtmf_finish_key=None` 을 넣으세요.
+
+### Added
+- **`ClawOpsAgent(passive_dtmf_max_digits=...)`** — 그 자리 수가 모이면 바로 전달합니다. 받을 자리 수가 항상 같을 때만 쓰세요.
+  넘치게 누른 키는 다음 입력으로 넘어갑니다.
+
+### Fixed
+- **`collect_dtmf` 가 수집 전에 누른 키를 앞에 붙이던 문제.** 수집이 열린 뒤 누른 키만 받습니다. 그 전에 누른 키는 모델에만 전달됩니다.
+- **`collect_dtmf` 대기가 안내 음성이 재생되는 동안 흐르던 문제.** `timeout`·`max_wait` 는 안내 음성 재생이 끝난 뒤부터 셉니다.
+  재생 중에 키를 누르면 안내를 멈추고 그 키부터 받습니다.
+- **`collect_dtmf` 가 실행되는 동안 대기음(`tool_config.hold_audio`)이 나가던 문제.** 키를 받는 동안에는 대기음을 틀지 않습니다.
+
 ## 0.69.0 (2026-10-21)
 
 ### Added

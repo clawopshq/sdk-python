@@ -10,6 +10,7 @@ import logging
 import math
 import struct
 import wave
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -152,6 +153,16 @@ def load_hold_audio(source: bool | str | bytes) -> list[bytes]:
         return [ulaw[i : i + CHUNK_SIZE] for i in range(0, len(ulaw), CHUNK_SIZE)]
 
     raise TypeError(f"지원하지 않는 hold_audio 타입: {type(source)}")
+
+
+# 발신자에게 키를 받는 도구. 이게 끼어 있는 묶음엔 대기음을 틀지 않는다 — 발신자가 키를
+# 누를 차례에 대기음이 안내를 덮고, 수집 내내 「기다리세요」 소리를 낸다.
+_NO_HOLD_AUDIO_TOOLS = frozenset({"collect_dtmf"})
+
+
+def hold_audio_allowed(tool_names: Iterable[str]) -> bool:
+    """이 도구 묶음을 실행하는 동안 대기음을 틀어도 되는가."""
+    return not any(name in _NO_HOLD_AUDIO_TOOLS for name in tool_names)
 
 
 class HoldAudioPlayer:

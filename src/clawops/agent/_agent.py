@@ -142,7 +142,9 @@ class ClawOpsAgent:
         recording_path: str = "./recordings",
         tracing: TracingConfig | None = None,
         builtin_tools: BuiltinTool | list[BuiltinTool] = BuiltinTool.ALL,
-        passive_dtmf_debounce_ms: int = 500,
+        passive_dtmf_debounce_ms: int = 2000,
+        passive_dtmf_finish_key: str | None = "#",
+        passive_dtmf_max_digits: int | None = None,
         tool_config: ToolConfig | None = None,
         rx_gain: float = 1.0,
         tx_gain: float = 1.0,
@@ -194,7 +196,20 @@ class ClawOpsAgent:
         self._hold_audio_chunks: list[bytes] | None = load_hold_audio(_hold_audio) if _hold_audio else None
 
         self._builtin_tools = resolve_builtin_tools(builtin_tools)
+        # 키패드 자동 전달의 확정 규칙. 셋 중 먼저 오는 것으로 확정한다 — 종료키 / 자리 수 /
+        # 마지막 키 뒤 대기. 기본 대기 2초는 Pipecat DTMFAggregator 와 같다. 0.5초였을 땐 사람
+        # 손 간격(실측 0.33~0.94초)보다 짧아 534 가 5·3·4 로 쪼개져 들어갔다.
+        if passive_dtmf_debounce_ms < 0:
+            raise AgentError("passive_dtmf_debounce_ms 는 0 이상이어야 합니다.")
+        if passive_dtmf_finish_key is not None and (
+            len(passive_dtmf_finish_key) != 1 or passive_dtmf_finish_key not in "0123456789*#"
+        ):
+            raise AgentError("passive_dtmf_finish_key 는 0-9, *, # 중 한 글자이거나 None 이어야 합니다.")
+        if passive_dtmf_max_digits is not None and passive_dtmf_max_digits < 1:
+            raise AgentError("passive_dtmf_max_digits 는 1 이상이거나 None 이어야 합니다.")
         self._passive_dtmf_debounce_ms = passive_dtmf_debounce_ms
+        self._passive_dtmf_finish_key = passive_dtmf_finish_key
+        self._passive_dtmf_max_digits = passive_dtmf_max_digits
         # call_id → 그 통화가 쓰는 Session. 팩토리 모드에서는 이 표가 SoT 다 —
         # _session_for() 가 여기에 만들어 넣고, 통화 teardown 이 pop 한다.
         # 공유 모드에서는 모든 항목이 같은 self._session 을 가리킨다.
@@ -1378,18 +1393,40 @@ class ClawOpsAgent:
             self._terminal_waiters.pop(call.call_id, None)
 
     def _on_dtmf_event(self, call: CallSession, digit: str) -> None:
-        """DTMF 수신 시 호출. collector 또는 패시브 모드로 라우팅."""
+        """DTMF 수신 시 호출. 수집 중이면 collect_dtmf 로, 아니면 모델 자동 전달로 보낸다.
+
+        한 키는 둘 중 한 곳으로만 간다. 예전엔 모든 키를 수집 큐에도 쌓아 두어서, 동의 때 자동
+        전달된 ``1`` 이 다음 collect_dtmf 의 첫 자리가 됐다(「1534」).
+        """
         asyncio.create_task(call._emit("dtmf", digit))
 
-        # Always route to queue — collector may not be active yet (tool call timing)
-        call._route_dtmf(digit)
-
         if call._dtmf_collector_active:
+            call._route_dtmf(digit)
+            # 안내 도중 누르면 안내를 끊는다(Twilio <Gather> 와 같다).
             asyncio.create_task(call.clear_audio())
             return
 
+        if self._passive_dtmf_finish_key is not None and digit == self._passive_dtmf_finish_key:
+            # 종료키 = 지금까지를 즉시 확정, 키 자신은 값에서 뺀다. 모인 게 없으면 키 자체를
+            # 넘긴다 — 「#번을 누르세요」 같은 메뉴가 깨지지 않게.
+            self._confirm_passive_dtmf(call, lone_key=digit)
+            return
+
         call._passive_dtmf_buffer.append(digit)
+        call._passive_dtmf_confirm_now = lambda: self._confirm_passive_dtmf(call)
+        if self._passive_dtmf_max_digits is not None and len(call._passive_dtmf_buffer) >= self._passive_dtmf_max_digits:
+            self._confirm_passive_dtmf(call)
+            return
         call._passive_dtmf_task = asyncio.create_task(self._flush_passive_dtmf(call))
+
+    def _confirm_passive_dtmf(self, call: CallSession, lone_key: str | None = None) -> None:
+        """대기 없이 지금까지 모인 키를 확정해 전달한다.
+
+        대기 중인 flush 는 ``_passive_dtmf_task`` 가 바뀐 걸 보고 스스로 물러난다.
+        """
+        digits = "".join(call._passive_dtmf_buffer) or (lone_key or "")
+        call._passive_dtmf_buffer.clear()
+        call._passive_dtmf_task = asyncio.create_task(self._feed_passive_dtmf(call, digits)) if digits else None
 
     async def _flush_passive_dtmf(self, call: CallSession) -> None:
         """이 통화의 패시브 DTMF 버퍼를 debounce 후 flush 해 LLM 에 주입한다.
@@ -1407,6 +1444,18 @@ class ClawOpsAgent:
         call._passive_dtmf_task = None
         if not digits:
             return
-        session_obj = self._call_sessions.get(call.call_id)
-        if session_obj:
-            await session_obj.feed_dtmf(digits)
+        await self._feed_passive_dtmf(call, digits)
+
+    async def _feed_passive_dtmf(self, call: CallSession, digits: str) -> None:
+        # 종료키·자리 수 확정은 대기 없이 연달아 올 수 있다(1#2#). 한 통화 안에선 차례로 보낸다.
+        if call._passive_dtmf_feed_lock is None:
+            call._passive_dtmf_feed_lock = asyncio.Lock()
+        async with call._passive_dtmf_feed_lock:
+            # 앞선 주입을 기다리는 사이 통화가 끝났으면 보내지 않는다.
+            if call._ended_event.is_set():
+                return
+            # 값은 카드번호일 수 있다 — 자릿수만 남긴다.
+            log.info("키패드 입력 %d자리 자동 전달 (call=%s)", len(digits), call.call_id)
+            session_obj = self._call_sessions.get(call.call_id)
+            if session_obj:
+                await session_obj.feed_dtmf(digits)

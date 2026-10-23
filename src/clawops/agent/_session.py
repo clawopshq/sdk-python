@@ -83,6 +83,11 @@ class CallSession:
         # debounce 값이 에이전트 설정이라서다.
         self._passive_dtmf_buffer: list[str] = []
         self._passive_dtmf_task: asyncio.Task[None] | None = None
+        # 버퍼에 남은 키를 대기 없이 확정하는 함수. ClawOpsAgent 가 버퍼에 키를 넣을 때 건다 —
+        # collect_dtmf 가 열릴 때 부른다.
+        self._passive_dtmf_confirm_now: Callable[[], None] | None = None
+        # 한 통화의 자동 전달은 차례로 보낸다(OpenAI 는 주입이 두 번의 호출이라 겹치면 응답이 둘 생긴다).
+        self._passive_dtmf_feed_lock: asyncio.Lock | None = None
 
     def bind_transport(
         self,
@@ -171,9 +176,30 @@ class CallSession:
             await handler(self, *args)
 
     def _route_dtmf(self, digit: str) -> None:
-        """DTMF digit을 큐로 라우팅한다 (내부 전용).
-        collector가 아직 활성화되기 전에 도착한 digit도 버퍼링한다."""
+        """DTMF digit을 수집 큐에 넣는다 (내부 전용).
+
+        ``ClawOpsAgent`` 는 수집이 열려 있을 때만 부른다. 구간 밖 키는 모델에 자동 전달되므로
+        여기까지 오면 같은 키가 두 경로로 간다 — 동의 때 누른 ``1`` 이 다음 수집의 첫 자리가
+        돼 「1534」 가 나왔다."""
         self._dtmf_queue.put_nowait(digit)
+
+    async def _wait_prompt_played(self, limit: float) -> None:
+        """지금까지 보낸 안내 음성이 발신자에게 다 재생될 때까지 기다린다.
+
+        재생 끝을 알 수단(media WS 의 mark)이 없는 transport 면 바로 돌아온다 — 종전 동작이다.
+        """
+        wait_played_out = getattr(self._media_ws, "wait_played_out", None)
+        if wait_played_out is None:
+            return
+        t0 = time.monotonic()
+        try:
+            played = await wait_played_out(limit)
+        except Exception as e:  # noqa: BLE001 — 끊기는 소켓에서 mark 전송이 실패할 수 있다. 그때부터 센다.
+            log.info("키패드 수집: 안내 재생 끝 확인 실패 (%s)", type(e).__name__)
+            return
+        log.info(
+            "키패드 수집: 안내 재생 끝 %.2fs%s", time.monotonic() - t0, "" if played else " (확인 못 함)"
+        )
 
     async def collect_dtmf(
         self,
@@ -188,10 +214,17 @@ class CallSession:
         ``timeout`` 은 **자리 사이** 대기다(inter-digit). ``<Gather>`` 를 비롯한 IVR 관행과
         같은 의미이고, 자리가 들어올 때마다 다시 시작한다.
 
+        대기는 **안내 음성이 다 재생된 뒤**부터 센다(Twilio ``<Gather>`` 와 같다). 모델은 안내
+        텍스트를 다 만든 순간 이 도구를 부르지만 발신자 쪽에선 음성이 아직 10초 넘게 남아 있을
+        수 있다 — 그때부터 세면 누를 틈도 없이 빈 값으로 끝난다. 재생 중에 누른 첫 키는 그대로
+        받고(안내는 ``ClawOpsAgent`` 가 끊는다), 그 순간부터 센다.
+
+        수집이 열린 **뒤에** 누른 키만 받는다. 그 전에 누른 키는 모델에 자동 전달된다.
+
         ``max_wait`` 는 그 관행이 만드는 최악을 막는 **전체 상한**이다. 자리마다 리셋되는
         타이머만 있으면 수집 하나가 최대 ``max_digits × timeout`` 동안 산다 — 11자리·5초면
         **55초**이고, 그동안 모델은 이 도구에 붙들려 아무 말도 못 한다. 발신자에게는 그냥
-        먹통이다. ``None`` 을 주면 상한 없이 종전대로 돈다.
+        먹통이다. 이것도 재생이 끝난 뒤부터 센다. ``None`` 을 주면 상한 없이 종전대로 돈다.
 
         ⚠️ **수집값을 로그에 쓰지 않는다.** 키패드로 받는 값은 카드번호·주민번호일 수 있고,
         실제로 그런 구성이 있다. ``secure`` 와 무관하게 **자릿수만** 남긴다 — 이 인자는
@@ -201,19 +234,44 @@ class CallSession:
             raise DtmfCollectorBusy("이미 DTMF 수집 중입니다")
 
         self._dtmf_collector_active = True
-        # Don't create new queue — drain pre-buffered digits first
+        # 수집 직전에 눌러 아직 자동 전달 대기 중인 키는 지금 모델에 넘긴다. 수집으로 가져오면
+        # 앞 질문의 답(동의 1 등)이 섞이고, 버리면 잃는다. 2초 대기 동안 기다리게 두면 도구 호출이
+        # 걸린 채로 늦게 들어간다.
+        if self._passive_dtmf_buffer and self._passive_dtmf_confirm_now is not None:
+            self._passive_dtmf_confirm_now()
+        # 구간 밖 키가 남아 있으면 버린다(방어 — 정상 경로에선 비어 있다).
+        while not self._dtmf_queue.empty():
+            self._dtmf_queue.get_nowait()
         collected: list[str] = []
-        deadline = (
-            asyncio.get_running_loop().time() + max_wait if max_wait is not None else None
-        )
+        loop = asyncio.get_running_loop()
 
         try:
-            while len(collected) < max_digits:
+            # 1) 안내가 다 재생되거나 첫 키가 올 때까지. 재생 대기 상한은 max_wait(없으면 60초).
+            first = asyncio.ensure_future(self._dtmf_queue.get())
+            played = asyncio.ensure_future(self._wait_prompt_played(max_wait if max_wait is not None else 60))
+            try:
+                await asyncio.wait({first, played}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                played.cancel()
+                if not first.done():
+                    # 아직 깨어나지 않은 get() 은 취소해도 키를 잃지 않는다.
+                    first.cancel()
+            pending: list[str] = [first.result()] if first.done() and not first.cancelled() else []
+
+            # 2) 여기서부터 자리 사이 대기·전체 상한을 센다.
+            deadline = loop.time() + max_wait if max_wait is not None else None
+            done = False
+            for digit in pending:
+                if digit == finish_on_key:
+                    done = True
+                    break
+                collected.append(digit)
+            while not done and len(collected) < max_digits:
                 wait_s = timeout
                 if deadline is not None:
                     # 남은 예산이 자리 간 대기보다 짧으면 그만큼만 기다린다. 0 이하면
                     # 전체 상한에 닿은 것이라 지금까지 모인 값으로 확정한다.
-                    wait_s = min(timeout, deadline - asyncio.get_running_loop().time())
+                    wait_s = min(timeout, deadline - loop.time())
                     if wait_s <= 0:
                         break
                 try:

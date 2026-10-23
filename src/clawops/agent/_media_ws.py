@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
@@ -90,6 +91,10 @@ def _redact_url(url: str) -> str:
     return urlparse(url)._replace(query="", fragment="").geturl()
 
 
+# 재생 끝 mark 를 보내기 전에 새 오디오가 이만큼 안 들어와야 한다(조각 TTS 대비).
+PLAYOUT_QUIET_S = 0.3
+
+
 class MediaWebSocket:
     """통화 하나의 미디어 스트림.
 
@@ -125,6 +130,7 @@ class MediaWebSocket:
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._send_task: asyncio.Task[None] | None = None
         self._mark_waiters: dict[str, asyncio.Event] = {}
+        self._last_audio_at = 0.0
 
     async def connect(self) -> None:
         if self._expected_media_profile is not None:
@@ -176,6 +182,7 @@ class MediaWebSocket:
             await self.close()
 
     async def send_audio(self, audio: bytes) -> None:
+        self._last_audio_at = time.monotonic()
         self._audio_queue.put_nowait(audio)
 
     async def send_clear(self) -> None:
@@ -228,6 +235,41 @@ class MediaWebSocket:
             # (정상 echo 경로에서는 이미 pop 됐으므로 pop(name, None) 은 no-op.)
             self._mark_waiters.pop(name, None)
 
+    async def wait_played_out(self, timeout: float) -> bool:
+        """지금까지 보낸 오디오가 발신자에게 다 재생될 때까지 기다린다. 재생 끝 echo 를 받았으면 True.
+
+        서버는 mark 앞의 오디오를 RTP 로 다 내보낸 뒤 mark 를 돌려주고, ``clear`` 때는 남은
+        mark 를 즉시 돌려준다(Twilio Media Streams 와 같은 의미). 그래서 순서가 둘 다 중요하다.
+        - 오디오는 송신 큐를 거치고 mark 는 바로 나가므로, 큐를 먼저 비워야 mark 가 오디오를
+          앞지르지 않는다.
+        - 재생할 게 없으면 echo 가 곧장 오므로, waiter 를 **보내기 전에** 걸어 둬야 놓치지 않는다
+          (``send_mark`` → ``wait_for_mark`` 순서는 그 사이에 온 echo 를 흘린다).
+        """
+        if not self.is_connected:
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        # 오디오가 조각조각 이어서 들어오는 중이면(LiveKit 처럼 TTS 를 만들면서 흘려 보내는 경로)
+        # 큐가 잠깐 빈 틈에 mark 를 보내 안내 앞부분만 재생된 시점을 끝으로 볼 수 있다. 새 오디오가
+        # PLAYOUT_QUIET_S 동안 안 들어올 때까지 기다린 뒤 보낸다.
+        while True:
+            await self.flush()
+            quiet_for = time.monotonic() - self._last_audio_at
+            if quiet_for >= PLAYOUT_QUIET_S or loop.time() >= deadline:
+                break
+            await asyncio.sleep(PLAYOUT_QUIET_S - quiet_for)
+        name = f"playout-{uuid.uuid4().hex[:12]}"
+        evt = asyncio.Event()
+        self._mark_waiters[name] = evt
+        try:
+            await self.send_mark(name)
+            await asyncio.wait_for(evt.wait(), timeout=max(0.0, deadline - loop.time()))
+            return self.is_connected
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._mark_waiters.pop(name, None)
+
     async def _send_loop(self) -> None:
         """오디오 청크를 플랫폼으로 전송 (pacing은 플랫폼이 처리)."""
         try:
@@ -257,6 +299,9 @@ class MediaWebSocket:
         await self.close()
 
     async def close(self) -> None:
+        # 기다리던 mark 는 이제 안 온다 — 상한까지 붙잡지 말고 깨운다.
+        for evt in self._mark_waiters.values():
+            evt.set()
         self._audio_queue.put_nowait(None)
         if self._send_task and not self._send_task.done():
             self._send_task.cancel()
