@@ -14,6 +14,8 @@ from urllib.parse import quote
 
 import aiohttp
 
+from .._exceptions import AgentAuthRejectedError
+
 log = logging.getLogger("clawops.agent")
 
 INITIAL_RECONNECT_DELAY = 1.0
@@ -35,6 +37,29 @@ CLOSE_OWNERSHIP_LOST = 4403
 # 나머지 코드(1001 gateway draining, 비정상 절단 등)는 계속 재연결한다 — 그때는 자리가
 # 실제로 비어 있고 그 자리의 주인이 우리다.
 NON_RETRYABLE_CLOSE_CODES = frozenset({CLOSE_REPLACED, CLOSE_OWNERSHIP_LOST})
+
+# 핸드셰이크를 이 상태로 거절당하면 다시 시도해도 결과가 같다 — 키(401·403)·번호(403)·요청 형식(400).
+# 2026-10-28 서버 실측: 폐기된 키·회수된 번호로 붙던 에이전트 21곳이 403 을 30초마다 끝없이 다시 시도하고
+# 있었다(고객은 모른 채). 일시적 실패(429 재연결 제한·5xx·네트워크)는 지금처럼 재연결한다.
+REJECTED_HANDSHAKE_STATUSES = frozenset({400, 401, 403})
+
+
+def _rejection_message(status: int, code: str | None, *, account_id: str, number: str) -> str:
+    if code == "api_key_invalid":
+        return (
+            "API 키가 유효하지 않습니다(폐기·만료됐거나 다른 계정의 키). "
+            f"계정 {account_id} 의 새 키를 발급해 설정하세요."
+        )
+    if code == "api_key_missing":
+        return "API 키가 전달되지 않았습니다. api_key 또는 CLAWOPS_API_KEY 를 확인하세요."
+    if code == "number_not_owned":
+        return (
+            f"번호 {number} 는 계정 {account_id} 의 번호가 아닙니다(반납·회수됐거나 다른 계정 번호). "
+            "콘솔에서 번호를 확인하세요."
+        )
+    if code == "number_missing":
+        return "번호가 전달되지 않았습니다. from_ 을 확인하세요."
+    return f"서버가 연결을 거절했습니다(HTTP {status}). API 키와 번호({number})를 확인하세요."
 
 # 전환 결과를 기다리는 **방어선**. 정상 경로의 일부가 아니다 — 서버가 대상 응답 대기(transfer
 # 파라미터 `timeout`)를 관리하고 결과 이벤트를 반드시 보내므로, 클라이언트는 브리지가 얼마나
@@ -82,6 +107,7 @@ class ControlWebSocket:
         on_call_failed: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         on_terminal_close: Callable[[int, str], None] | None = None,
         on_retired: Callable[[str], None] | None = None,
+        on_rejected: Callable[[AgentAuthRejectedError], None] | None = None,
     ) -> None:
         self._url_parts = {"base_url": base_url, "account_id": account_id, "number": number}
         self._url = build_control_ws_url(base_url=base_url, account_id=account_id, number=number)
@@ -93,6 +119,7 @@ class ControlWebSocket:
         self._on_call_failed = on_call_failed
         self._on_terminal_close = on_terminal_close
         self._on_retired = on_retired
+        self._on_rejected = on_rejected
         # lame duck = 이 프로세스는 물러나는 중이다. 어떤 이유로 끊겨도 **재연결하지 않는다**.
         #   게이트웨이 롤링(1001)이나 네트워크 blip(1006)에 재연결하면 그 사이 자리를 받은
         #   후임을 밀어낸다. 후임은 SIGTERM 도 안 받았는데 물러나고, 우리는 곧 스스로 죽는다.
@@ -101,6 +128,9 @@ class ControlWebSocket:
         self._session: aiohttp.ClientSession | None = None
         self._running = False
         self._connected = asyncio.Event()
+        # 핸드셰이크 거절(재연결 안 함). wait_connected() 가 타임아웃을 기다리지 않고 바로 깨어나 던진다.
+        self._rejected: AgentAuthRejectedError | None = None
+        self._rejected_event = asyncio.Event()
         # 전환 대기는 **요청 단위**로 키잉한다(callId 아님). return 모드는 실패 후 AI 로 돌아와
         # 같은 통화에서 전환을 다시 타므로(서버 transfer-handler 주석: 실측 8회 재시도), callId 로
         # 키잉하면 2차 요청이 1차 대기를 덮어써 1차가 영영 resolve 되지 않는다.
@@ -122,9 +152,30 @@ class ControlWebSocket:
     def lame_duck(self) -> bool:
         return self._lame_duck
 
+    @property
+    def rejected(self) -> AgentAuthRejectedError | None:
+        return self._rejected
+
     async def wait_connected(self, timeout: float = 10.0) -> None:
-        """Control WS 연결이 완료될 때까지 대기한다."""
-        await asyncio.wait_for(self._connected.wait(), timeout)
+        """Control WS 연결이 완료될 때까지 대기한다.
+
+        서버가 핸드셰이크를 거절하면(키·번호) 타임아웃을 기다리지 않고 ``AgentAuthRejectedError`` 를 던진다.
+        """
+        if self._rejected is not None:
+            raise self._rejected
+        connected = asyncio.ensure_future(self._connected.wait())
+        rejected = asyncio.ensure_future(self._rejected_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {connected, rejected}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for fut in (connected, rejected):
+                fut.cancel()
+        if self._rejected is not None:
+            raise self._rejected
+        if not done:
+            raise asyncio.TimeoutError()
 
     async def connect(self) -> None:
         self._running = True
@@ -183,6 +234,31 @@ class ControlWebSocket:
             except asyncio.CancelledError:
                 # close() 나 태스크 취소 — 재접속하지 않는다.
                 raise
+            except aiohttp.WSServerHandshakeError as e:
+                if e.status not in REJECTED_HANDSHAKE_STATUSES:
+                    # 429·5xx 등 — 자리가 실제로 비어 있을 수 있다. 재연결한다.
+                    log.warning(f"Control WS error: {type(e).__name__}: {e}")
+                else:
+                    code = e.headers.get("X-ClawOps-Error-Code") if e.headers else None
+                    err = AgentAuthRejectedError(
+                        _rejection_message(
+                            e.status,
+                            code,
+                            account_id=self._url_parts["account_id"],
+                            number=self._url_parts["number"],
+                        ),
+                        status=e.status,
+                        code=code,
+                    )
+                    self._running = False
+                    self._rejected = err
+                    self._rejected_event.set()
+                    log.error(f"Control WS 거절({e.status} {code or '-'}) — 재연결하지 않는다: {err.message}")
+                    if self._on_rejected:
+                        try:
+                            self._on_rejected(err)
+                        except Exception:
+                            log.exception("on_rejected 콜백 실패")
             except Exception as e:
                 # 예외 종류로 재접속 여부를 가르지 않는다. 예전에는 aiohttp.ClientError/OSError
                 # 만 잡아, 그 밖의 예외(InvalidStateError 등)에 재접속 없이 태스크가 죽었다.

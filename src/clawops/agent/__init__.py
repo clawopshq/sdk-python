@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
+from .._exceptions import AgentAuthRejectedError
 from ._agent import ClawOpsAgent, ToolConfig
 from ._deploy_checks import clear_stale_ready_marker
 from ._incoming import IncomingCall
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 clear_stale_ready_marker()
 
 __all__ = [
+    "AgentAuthRejectedError",
     "BuiltinTool",
     "CallSession",
     "DtmfCollectorBusy",

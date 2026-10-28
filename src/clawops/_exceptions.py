@@ -256,3 +256,18 @@ class AgentError(ClawOpsError):
 
 class AgentConnectionError(AgentError):
     """Agent WebSocket 연결 실패."""
+
+
+class AgentAuthRejectedError(AgentConnectionError):
+    """서버가 control 연결을 거절했다(HTTP 400·401·403) — 다시 시도해도 결과가 같다.
+
+    API 키가 없거나 폐기·만료됐거나, 번호가 이 계정 것이 아닐 때 난다. SDK 는 재연결을 멈춘다.
+    ``code`` 는 서버가 준 사유(``X-ClawOps-Error-Code``)다 — ``api_key_missing``·
+    ``api_key_invalid``·``number_missing``·``number_not_owned``. 사유를 주지 않는 서버면 None.
+    """
+
+    def __init__(self, message: str, *, status: int, code: str | None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.code = code

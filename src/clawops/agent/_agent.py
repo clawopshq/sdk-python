@@ -14,7 +14,7 @@ import time
 import inspect
 from typing import Any, Awaitable, Callable, Literal, TypedDict, TypeVar, Union
 
-from .._exceptions import AgentError
+from .._exceptions import AgentAuthRejectedError, AgentError
 from ._builtin_tools import BuiltinTool, resolve_builtin_tools
 from ._control_ws import CLOSE_REPLACED, ControlWebSocket
 from ._health import start_health_server
@@ -234,6 +234,8 @@ class ClawOpsAgent:
         # `self._control_ws is None` 과 다르다 — 그쪽은 "아직 연결한 적 없음" 까지 포함한다.
         # 종료 프레임이 더는 못 온다고 확신할 수 있는 건 내놓은 뒤뿐이다.
         self._control_given_up = False
+        # 서버가 control 연결을 거절했다(키 폐기·번호 회수 등). 다시 붙어도 같으니 이 에이전트는 끝이다.
+        self._auth_rejected: AgentAuthRejectedError | None = None
         # 인계 통지 훅. serve() 를 쓰면 필요 없다 — connect() 를 직접 모는 쪽이
         # 그 통지를 받아 drain() 을 부를 수 있게 열어 둔 자리다.
         self._on_taken_over = on_taken_over
@@ -310,7 +312,13 @@ class ClawOpsAgent:
         return fn
 
     async def connect(self) -> None:
-        """Control WS에 연결한다. 블로킹하지 않는다."""
+        """Control WS에 연결한다. 블로킹하지 않는다.
+
+        서버가 연결을 거절하면(API 키가 폐기·만료됐거나 번호가 이 계정 것이 아님)
+        ``AgentAuthRejectedError`` 를 던진다. 재시도해도 같으니 키·번호를 고친 뒤 새 에이전트를 띄운다.
+        """
+        if self._auth_rejected is not None:
+            raise self._auth_rejected
         if self._control_ws is not None:
             return
         # 배포 환경 진단 — 동작은 안 바꾸고 조용한 실패만 시끄럽게 한다.
@@ -426,6 +434,9 @@ class ClawOpsAgent:
         if self._taken_over:
             retired_event.set()
             stop_event.set()
+        # 연결 직후 거절됐어도 같다 — 아래에서 곧바로 드레이닝으로 간다.
+        if self._auth_rejected is not None:
+            stop_event.set()
         loop = asyncio.get_running_loop()
         signals = 0
 
@@ -461,6 +472,9 @@ class ClawOpsAgent:
         try:
             await stop_event.wait()
             deadline_at = loop.time() + shutdown_deadline
+            # 거절당한 자리는 넘길 후임도 지킬 자리도 없다 — 진행 중 통화만 마친다.
+            if self._auth_rejected is not None:
+                skip_handover_event.set()
 
             # ── 국면 1: 인계 대기 ──
             # SIGTERM 으로 내려가는 중이고, 아직 인계를 못 받았고, 절단 지시도 없을 때만.
@@ -514,6 +528,9 @@ class ClawOpsAgent:
             self._retired_serve = None
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
+        # 조용히 돌아가면 프로세스가 정상 종료(0)로 끝나 거절이 묻힌다 — 던져서 실패로 끝낸다.
+        if self._auth_rejected is not None:
+            raise self._auth_rejected
 
     def _handle_taken_over(self, code: int, reason: str) -> None:
         """서버가 이 번호의 control 연결을 다른 프로세스에 넘겼다.
@@ -536,6 +553,18 @@ class ClawOpsAgent:
         # 하지 않게 표시한다.
         if self._retired_serve is not None:
             self._retired_serve.set()
+        if self._stop_serve is not None:
+            self._stop_serve.set()
+
+    def _handle_rejected(self, err: AgentAuthRejectedError) -> None:
+        """서버가 control 재연결을 거절했다 — 실행 중에 키가 폐기됐거나 번호가 회수됐다.
+
+        다시 붙어도 같으니 콜을 더 받을 수 없다. 준비 표시를 내리고 serve() 를 깨워
+        진행 중 통화만 마치고 ``AgentAuthRejectedError`` 로 끝나게 한다.
+        """
+        self._auth_rejected = err
+        self._ready = False
+        remove_ready_marker()
         if self._stop_serve is not None:
             self._stop_serve.set()
 
@@ -759,9 +788,16 @@ class ClawOpsAgent:
             on_call_failed=self._handle_failed,
             on_terminal_close=self._handle_taken_over,
             on_retired=self._handle_retired,
+            on_rejected=self._handle_rejected,
         )
         self._control_ws_task = asyncio.create_task(self._control_ws.connect())
-        await self._control_ws.wait_connected()
+        try:
+            await self._control_ws.wait_connected()
+        except AgentAuthRejectedError:
+            # 첫 연결부터 거절 — 연결 태스크는 이미 멈췄다. 붙은 적이 없으니 자리를 비워 둔다.
+            self._control_ws = None
+            self._control_ws_task = None
+            raise
         try:
             await self._control_ws.send({"event": "agent.hello", "sdk": get_sdk_info()})
         except Exception:
