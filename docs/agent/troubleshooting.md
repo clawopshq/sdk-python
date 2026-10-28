@@ -1,5 +1,35 @@
 # 트러블슈팅
 
+## 연결이 거절됨 (AgentAuthRejectedError)
+
+### 증상
+
+에이전트가 시작하자마자, 또는 실행 중에 아래 오류로 멈춥니다.
+
+```
+Control WS 거절(403 api_key_invalid) — 재연결하지 않는다: API 키가 유효하지 않습니다(폐기·만료됐거나 다른 계정의 키). ...
+```
+
+### 원인과 해결
+
+다시 연결해도 결과가 같은 거절이라 SDK 가 재연결을 멈춥니다. `err.code` 로 원인을 구분합니다.
+
+| `code` | 원인 | 해결 |
+| --- | --- | --- |
+| `api_key_invalid` | API 키가 폐기·만료됐거나 다른 계정의 키 | 콘솔에서 새 키를 발급해 `CLAWOPS_API_KEY` 에 넣고 에이전트를 다시 띄웁니다 |
+| `api_key_missing` | API 키가 전달되지 않음 | `api_key` 인자나 `CLAWOPS_API_KEY` 를 설정합니다 |
+| `number_not_owned` | 번호가 이 계정 것이 아님(반납·회수 등) | 콘솔에서 계정의 번호를 확인하고 `from_` 을 고칩니다 |
+| `number_missing` | 번호가 전달되지 않음 | `from_` 을 설정합니다 |
+
+```python
+from clawops.agent import AgentAuthRejectedError
+
+try:
+    await agent.serve()
+except AgentAuthRejectedError as err:
+    print(err.code, err.message)
+```
+
 ## SSL 인증서 에러 (SSLCertVerificationError)
 
 ### 증상
